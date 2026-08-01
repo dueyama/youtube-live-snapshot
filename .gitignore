@@ -1,0 +1,26 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Host-specific settings and local environment files
+config/*.yaml
+!config/*.sample.yaml
+.env
+.env.*
+!.env.example
+
+# Runtime data and generated artifacts
+captures/
+data/
+logs/
+run/
+out/
+captures_test/
+*.log

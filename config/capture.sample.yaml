@@ -1,0 +1,39 @@
+# YouTube Live Snapshot v3.1 sample configuration
+embed_url: null  # required: YouTube watch/live/embed URL
+chrome:
+  driver_path: /usr/bin/chromedriver
+  binary_path: null          # set a Chromium-compatible browser path when auto-detection is unavailable
+  window_size: "1920,1080"
+  page_load_timeout_sec: 30
+capture:
+  output_dir: ./captures
+  max_retries: 3
+  retry_delay_sec: 10
+  live_edge_seek: true
+  live_edge_max_lag_sec: 30
+  live_edge_offset_sec: 2
+  max_files: null         # set an integer only when old captures may be deleted
+  max_disk_mb: null       # set an integer only when old captures may be deleted
+schedule:
+  timezone: Asia/Tokyo
+  latitude: null           # required when enable_sunset is true
+  longitude: null          # required when enable_sunset is true
+  location_name: Webcam Location
+  region: Japan
+  sunset_offset_minutes: 40
+  sunset_prefix: sunset
+  misfire_grace_time_sec: 300  # run once when Pi scheduling is delayed by up to 5 minutes
+  fixed_times:
+    - id: noon
+      time: "12:00"
+      prefix: noon
+    # Add more independent daily series when needed:
+    # - id: morning
+    #   time: "08:00"
+    #   prefix: morning
+  enable_sunset: true
+logging:
+  level: INFO
+  log_file: null
+test_mode:
+  interval_minutes: 2

@@ -1,0 +1,71 @@
+# YouTube Live Snapshot renderer v3.1 sample configuration
+year: 2025
+source_year: null
+locale: ja  # ja or en
+input_dir: ./captures
+output_dir: ./out
+font_path: null  # uses the bundled Noto font; set a path to override
+cell_width: 280
+cell_height: 280
+save_jpeg: false
+min_coverage: 0.75
+require_pdf: false
+skip_annual: false
+include_empty_months: false
+temp_dir: ./out/.tmp_calendar
+retain_temp_files: false
+placeholder:
+  enabled: true
+  text: null  # localized automatically; set a string to override
+logging:
+  level: INFO
+  log_file: ./out/calendar.log
+categories:
+  - id: noon_sea
+    prefix: noon
+    gravity: south
+    crop_offset: 170
+    mode: thumbnail
+    output: "{year}_noon_sea_calendar.png"
+  - id: noon_sea_avg
+    prefix: noon
+    gravity: south
+    crop_offset: 170
+    mode: avg
+    output: "{year}_noon_sea_calendar-c.png"
+  - id: noon_sky
+    prefix: noon
+    gravity: north
+    crop_offset: 200
+    mode: thumbnail
+    output: "{year}_noon_sky_calendar.png"
+  - id: noon_sky_avg
+    prefix: noon
+    gravity: north
+    crop_offset: 200
+    mode: avg
+    output: "{year}_noon_sky_calendar-c.png"
+  - id: sunset_sea
+    prefix: sunset
+    gravity: south
+    crop_offset: 170
+    mode: thumbnail
+    output: "{year}_sunset_sea_calendar.png"
+  - id: sunset_sea_avg
+    prefix: sunset
+    gravity: south
+    crop_offset: 170
+    mode: avg
+    output: "{year}_sunset_sea_calendar-c.png"
+  - id: sunset_sky
+    prefix: sunset
+    gravity: north
+    crop_offset: 200
+    mode: thumbnail
+    output: "{year}_sunset_sky_calendar.png"
+  - id: sunset_sky_avg
+    prefix: sunset
+    gravity: north
+    crop_offset: 200
+    mode: avg
+    output: "{year}_sunset_sky_calendar-c.png"

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-live-snapshot"
+version = "3.1.0"
+description = "Schedule still-image captures from YouTube Live and render visual archive outputs."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+  "selenium>=4.18.1",
+  "apscheduler>=3.10.4",
+  "pytz>=2023.3",
+  "astral>=3.2,<4",
+  "Pillow>=10.2.0",
+  "reportlab>=4.0.8,<5",
+  "jpholiday>=0.1.8",
+  "PyYAML>=6.0",
+]
+keywords = ["youtube-live", "snapshot", "raspberry-pi", "render", "calendar"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+ytlive-snapshot = "ytlive_snapshot.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/dueyama/youtube-live-snapshot"
+Repository = "https://github.com/dueyama/youtube-live-snapshot.git"
+Issues = "https://github.com/dueyama/youtube-live-snapshot/issues"
+
+[tool.setuptools]
+packages = ["ytlive_snapshot"]
+
+[tool.setuptools.data-files]
+"share/youtube-live-snapshot/fonts" = [
+  "assets/fonts/NotoSansCJKjp-Regular.otf",
+  "assets/fonts/NotoSansCJK-LICENSE.txt",
+]

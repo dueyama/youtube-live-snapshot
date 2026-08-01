@@ -1,0 +1,8 @@
+selenium>=4.18.1
+apscheduler>=3.10.4
+pytz>=2023.3
+astral>=3.2,<4
+Pillow>=10.2.0
+reportlab>=4.0.8,<5  # optional: PDF 出力が不要なら削除可
+jpholiday>=0.1.8   # optional: 日本の祝日ハイライトが不要なら削除可
+PyYAML>=6.0
