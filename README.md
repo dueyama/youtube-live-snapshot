@@ -204,7 +204,7 @@ ytlive-snapshot capture \
   --no-sunset
 ```
 
-For continuous operation, run the foreground command from systemd or another service manager. Keep the service definition, boot ordering, credentials, and host lifecycle in the host-management layer. See [RUNBOOK.md](RUNBOOK.md).
+For continuous operation, run the foreground command from systemd or another service manager. Keep service definitions and credentials outside the application directory, and manage startup and shutdown with the operating system's service manager. See [RUNBOOK.md](RUNBOOK.md).
 
 Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only an image that passes every enabled check is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
 
@@ -286,10 +286,9 @@ with acceptable timestamp conditions can become an official capture. A clear
 frame failure or stale/future timestamp is recorded as `rejected`; an uncertain
 verdict, API failure, invalid response, or required-but-unreadable timestamp is
 recorded as `unverified`. Both enter the same bounded retry path and retain
-their evidence. The former `advisory` value is accepted temporarily for
-configuration compatibility, emits a deprecation warning, and now behaves as
-`enforce`; report-only AI review belongs in a separate post-capture audit.
-Streams without a visible camera clock should leave `require_timestamp: false`.
+their evidence. Use `mode: enforce`; report-only review should run as a separate
+post-capture audit. Streams without a visible camera clock should leave
+`require_timestamp: false`.
 The default six-minute tolerance treats the timestamp as a broad freshness
 guard rather than a clock-synchronization check, allowing for modest camera
 clock skew as well as stream delay.
@@ -416,7 +415,7 @@ The repository's [AGENTS.md](AGENTS.md) tells compatible agents not to delete pe
 ## Data safety
 
 - `captures/`, `captures_test/`, `data/`, `out/`, logs, and private configuration are ignored by Git.
-- Old snapshots are deleted only when `max_files` or `max_disk_mb` is explicitly configured.
+- Snapshots are deleted only when `max_files` or `max_disk_mb` is explicitly configured.
 - Keep persistent snapshots outside the replaceable application directory.
 - Confirm that you have the right to capture and store the stream and that your use follows the applicable YouTube terms and policies.
 
@@ -468,7 +467,7 @@ AIエージェントがなくても単独で動作します。Codexなどと組�
 
 ### YouTube Live URLの取り方
 
-旧運用で使っていたのは、個別配信の埋め込みURLです。
+最も確実な入力は、対象となるライブ動画の埋め込みURLです。
 
 ```text
 https://www.youtube.com/embed/VIDEO_ID
@@ -573,7 +572,7 @@ ytlive-snapshot capture \
   --no-sunset
 ```
 
-常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義、起動停止、秘密設定、OS管理はホスト管理側で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
+常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義と認証情報はアプリのディレクトリ外に置き、起動・停止はOSのサービス管理機能で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
 
 保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、有効な検査をすべて通過した画像だけを一時ファイルから正式な永続ファイル名へ移します。これらは既定で有効です。
 
@@ -585,7 +584,7 @@ ytlive-snapshot capture \
 
 ### 任意のAI画像検査
 
-AI画像検査は**既定では無効**です。通常のインストールではOpenAI APIを呼び出さず、APIキーも不要で、従来のローカル検査だけを行います。
+AI画像検査は**既定では無効**です。通常のインストールではOpenAI APIを呼び出さず、APIキーも不要で、上記のローカル機械検査だけを行います。
 
 このオプションの目的は、長期間無人運転する撮影システムに、画像内容を理解する補助的な確認を追加することです。第一判定は常にローカルの機械検査です。YouTubeプレイヤー状態、画面に表示された遅延、画像ファイルの正常性、黒画面やほぼ一様な画像は機械的に確認できます。一方、画像ファイルとしては正常に見える特殊なエラー画面や想定外の表示、小さなカメラ時計の多様な配置までは、固定ルールだけでは完全に扱えません。AI検査は、このような「画像としては成立しているが保存したくない可能性があるフレーム」を補助的に見つけ、画像内のカメラ時刻と予定撮影時刻を比較するためのものです。
 
@@ -612,7 +611,7 @@ capture:
     require_timestamp: false
 ```
 
-AIを有効にすると、その判定も正式保存の必須条件になります。`decision=pass`で時刻条件も満たした画像だけが正式画像です。明確な画面不良や古い・未来の時刻は`rejected`、判断不能、API障害、不正な応答、必須時刻を読めない場合は`unverified`として証拠を残し、どちらも同じ上限付き試行枠で再撮影します。以前の`advisory`値は設定互換のため一時的に受理しますが、非推奨警告を出して`enforce`と同じ動作をします。ログだけのAI確認は、撮影後の別監査として行う位置付けです。時刻表示のない配信では`require_timestamp: false`のまま使用します。
+AIを有効にすると、その判定も正式保存の必須条件になります。`decision=pass`で時刻条件も満たした画像だけが正式画像です。明確な画面不良や古い・未来の時刻は`rejected`、判断不能、API障害、不正な応答、必須時刻を読めない場合は`unverified`として証拠を残し、どちらも同じ上限付き試行枠で再撮影します。`mode: enforce`を使用してください。判定結果を記録するだけの確認は、撮影後の別監査として実行します。時刻表示のない配信では`require_timestamp: false`のまま使用します。
 
 既定の許容差は6分です。これは時計同期の厳密な検査ではなく、大きな鮮度異常を見つけるための幅を持たせた判定であり、配信遅延だけでなくカメラ時計自体の多少のずれも許容します。
 
