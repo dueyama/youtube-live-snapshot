@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "youtube-live-snapshot"
-version = "3.2.1"
+version = "3.3.0"
 description = "Schedule still-image captures from YouTube Live and render visual archive outputs."
 readme = "README.md"
 license = "MIT"

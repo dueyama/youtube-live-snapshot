@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
 DEFAULT_DETAIL = "original"
-DEFAULT_MODE = "advisory"
+DEFAULT_MODE = "enforce"
 DEFAULT_TIMEOUT_SEC = 45.0
 DEFAULT_TIMESTAMP_TOLERANCE_SEC = 120.0
 DEFAULT_MAX_OUTPUT_TOKENS = 400
@@ -144,17 +145,19 @@ def validate_config(
         )
 
     timeout_sec = float(config.get("timeout_sec", DEFAULT_TIMEOUT_SEC))
-    if timeout_sec <= 0:
-        raise ValueError("capture.ai_validation.timeout_sec must be greater than zero")
+    if not math.isfinite(timeout_sec) or timeout_sec <= 0:
+        raise ValueError(
+            "capture.ai_validation.timeout_sec must be finite and greater than zero"
+        )
     tolerance_sec = float(
         config.get(
             "timestamp_tolerance_sec",
             DEFAULT_TIMESTAMP_TOLERANCE_SEC,
         )
     )
-    if tolerance_sec < 0:
+    if not math.isfinite(tolerance_sec) or tolerance_sec < 0:
         raise ValueError(
-            "capture.ai_validation.timestamp_tolerance_sec must be zero or greater"
+            "capture.ai_validation.timestamp_tolerance_sec must be finite and zero or greater"
         )
     max_output_tokens = int(
         config.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
@@ -169,14 +172,16 @@ def validate_config(
         )
 
 
-def _create_openai_client(*, api_key: str, timeout: float):
+def _create_openai_client(*, api_key: str, timeout: float, max_retries: int = 0):
     try:
         from openai import OpenAI
     except ImportError as exc:  # pragma: no cover - exercised without optional extra
         raise AIValidationError(
             "OpenAI support is not installed; install youtube-live-snapshot[ai]"
         ) from exc
-    return OpenAI(api_key=api_key, timeout=timeout)
+    # The capture command owns one global, bounded attempt budget. Disable the
+    # SDK's independent HTTP retry loop so one capture attempt is one API call.
+    return OpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
 
 
 def _image_data_url(path: Path) -> str:
@@ -229,9 +234,16 @@ def _normalize_inspection(
     observed_text = payload.get("observed_timestamp")
     if observed_text is not None and not isinstance(observed_text, str):
         raise AIValidationError("AI observed_timestamp must be a string or null")
+    if isinstance(observed_text, str):
+        observed_text = observed_text.strip() or None
     observed = _parse_timestamp(observed_text, expected)
     delta = None
-    if observed_text and observed is None:
+    if observed_text is None:
+        # A model-supplied `matches` label is not evidence without a timestamp
+        # that can be checked locally. This keeps require_timestamp strict.
+        if timestamp_status == "matches":
+            timestamp_status = "unreadable"
+    elif observed is None:
         timestamp_status = "unreadable"
     elif observed is not None:
         delta = (observed - expected).total_seconds()
@@ -322,7 +334,7 @@ def inspect_capture(
 
     try:
         factory = _create_openai_client if client_factory is None else client_factory
-        client = factory(api_key=api_key, timeout=timeout_sec)
+        client = factory(api_key=api_key, timeout=timeout_sec, max_retries=0)
         response = client.responses.create(
             model=model,
             input=[
@@ -349,8 +361,10 @@ def inspect_capture(
             max_output_tokens=max_output_tokens,
             store=False,
         )
-    except Exception as exc:
-        raise AIValidationError(f"OpenAI image inspection failed: {exc}") from exc
+    except Exception:
+        # Do not propagate provider response bodies into capture logs or
+        # rejected-attempt metadata.
+        raise AIValidationError("OpenAI image inspection request failed") from None
 
     output_text = getattr(response, "output_text", None)
     if not isinstance(output_text, str) or not output_text.strip():

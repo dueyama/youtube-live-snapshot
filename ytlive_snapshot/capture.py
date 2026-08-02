@@ -1,6 +1,8 @@
 import argparse
 import base64
 import datetime
+import hashlib
+import json
 import logging
 import math
 import os
@@ -8,6 +10,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -77,8 +80,24 @@ DEFAULT_SOURCE_MINIMUM_HEIGHT = 360
 DEFAULT_SOURCE_PREFERRED_WIDTH = 1280
 DEFAULT_SOURCE_PREFERRED_HEIGHT = 720
 DEFAULT_SOURCE_RESOLUTION_WAIT_SEC = 30
+REJECTED_CAPTURE_DIR_NAME = "rejected"
+REJECTED_CAPTURE_SCHEMA_VERSION = 1
+REJECTED_REASON_MAX_CHARS = 500
+REJECTED_AI_ISSUE_LIMIT = 10
 CAPTURE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 FIXED_TIME_RE = re.compile(r"^(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)$")
+URL_TEXT_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+OPENAI_KEY_TEXT_RE = re.compile(r"\bsk-[A-Za-z0-9_-]+\b")
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)\s*=\s*\S+",
+    re.IGNORECASE,
+)
+POSIX_PATH_TEXT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:[^/\s]+/)*[^/\s]+"
+)
+WINDOWS_PATH_TEXT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:\\|\\\\)[^\s]+"
+)
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "embed_url": DEFAULT_EMBED_URL,
@@ -152,6 +171,21 @@ logger = logging.getLogger("ytlive_snapshot.capture")
 
 class CaptureValidationError(RuntimeError):
     """The browser returned an image, but it is not a trustworthy live frame."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        outcome: str = "rejected",
+        reason_code: Optional[str] = None,
+        details: Optional[Mapping[str, Any]] = None,
+    ):
+        super().__init__(message)
+        if outcome not in {"rejected", "unverified"}:
+            raise ValueError(f"invalid validation outcome: {outcome}")
+        self.outcome = outcome
+        self.reason_code = reason_code
+        self.details = dict(details or {})
 
 
 def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
@@ -410,6 +444,303 @@ def _source_resolution_settings(capture_cfg: Mapping[str, Any]) -> Dict[str, Any
 
 def _ensure_output_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _make_capture_attempt_private(path: Path) -> bool:
+    """Set a generated attempt image to owner-only access when it exists."""
+    if path.is_symlink():
+        raise OSError("refusing to use a symbolic-link capture attempt")
+    if not path.exists():
+        return False
+    if not path.is_file():
+        raise OSError("capture attempt path is not a regular file")
+    os.chmod(path, 0o600)
+    return True
+
+
+def _prepare_private_capture_file(path: Path) -> None:
+    """Create an empty owner-only target before Selenium writes a screenshot."""
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        _make_capture_attempt_private(path)
+        return
+    try:
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def _write_private_capture_bytes(path: Path, payload: bytes) -> None:
+    """Exclusively create and write one owner-only capture attempt."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as image_file:
+            descriptor = -1
+            os.fchmod(image_file.fileno(), 0o600)
+            image_file.write(payload)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_screenshot_write(
+    path: Path,
+    *,
+    saved: bool,
+    capture_method: str,
+) -> None:
+    """Require every screenshot backend to produce a non-empty private file."""
+    if not saved:
+        raise WebDriverException(f"{capture_method} screenshot returned false")
+    if not _make_capture_attempt_private(path):
+        raise WebDriverException(
+            f"{capture_method} screenshot did not create a capture file"
+        )
+    if path.stat().st_size <= 0:
+        raise WebDriverException(
+            f"{capture_method} screenshot created an empty capture file"
+        )
+
+
+def _safe_metadata_text(value: Any, limit: int = REJECTED_REASON_MAX_CHARS) -> str:
+    """Bound runtime diagnostic text without persisting URLs, keys, or host paths."""
+    text = " ".join(str(value).split())
+    text = URL_TEXT_RE.sub("[redacted-url]", text)
+    text = OPENAI_KEY_TEXT_RE.sub("[redacted-key]", text)
+    text = SENSITIVE_ASSIGNMENT_RE.sub("[redacted-key]", text)
+    text = POSIX_PATH_TEXT_RE.sub("[redacted-path]", text)
+    text = WINDOWS_PATH_TEXT_RE.sub("[redacted-path]", text)
+    if len(text) > limit:
+        return text[: max(0, limit - 3)] + "..."
+    return text
+
+
+def _safe_metadata_value(value: Any) -> Any:
+    """Convert a known diagnostic structure into bounded JSON-safe values."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _safe_metadata_text(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _safe_metadata_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_metadata_value(item) for item in value[:REJECTED_AI_ISSUE_LIMIT]]
+    return type(value).__name__
+
+
+ARCHIVED_CHECK_FIELDS = {
+    "live_edge": (
+        "status",
+        "is_live",
+        "control_present",
+        "control_kind",
+        "displayed_lag_seconds",
+        "within_tolerance",
+        "seeked",
+    ),
+    "source_resolution": (
+        "status",
+        "result",
+        "width",
+        "height",
+        "preferred_width",
+        "preferred_height",
+        "minimum_width",
+        "minimum_height",
+    ),
+    "image_quality": ("status",),
+    "ai_validation": (
+        "status",
+        "model",
+        "decision",
+        "confidence",
+        "timestamp_status",
+        "observed_timestamp",
+        "timestamp_delta_seconds",
+        "error_type",
+    ),
+}
+
+
+def _archived_check_metadata(checks: Mapping[str, Any]) -> Dict[str, Any]:
+    """Allowlist capture-check fields; never persist model free-form prose."""
+    archived: Dict[str, Any] = {}
+    for check_name, allowed_fields in ARCHIVED_CHECK_FIELDS.items():
+        raw = checks.get(check_name, {})
+        if not isinstance(raw, Mapping):
+            archived[check_name] = {"status": "unverified"}
+            continue
+        record = {
+            field: _safe_metadata_value(raw[field])
+            for field in allowed_fields
+            if field in raw
+        }
+        observed_timestamp = record.get("observed_timestamp")
+        if observed_timestamp is not None:
+            try:
+                datetime.datetime.fromisoformat(
+                    str(observed_timestamp).replace("Z", "+00:00")
+                )
+            except ValueError:
+                record["observed_timestamp"] = None
+        archived[check_name] = record or {"status": "not_run"}
+    return archived
+
+
+def _capture_artifact_image_metadata(
+    image_path: Optional[Path],
+    capture_method: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if image_path is None or not image_path.is_file():
+        return None
+
+    digest = hashlib.sha256()
+    with image_path.open("rb") as image_file:
+        for chunk in iter(lambda: image_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    width = None
+    height = None
+    try:
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except (OSError, UnidentifiedImageError):
+        pass
+
+    return {
+        "filename": "capture.png",
+        "sha256": digest.hexdigest(),
+        "width": width,
+        "height": height,
+        "capture_method": capture_method,
+    }
+
+
+def _archive_failed_capture_attempt(
+    *,
+    output_dir: Path,
+    image_path: Optional[Path],
+    intended_filename: str,
+    series: str,
+    attempt_number: int,
+    max_attempts: int,
+    attempt_started_at: datetime.datetime,
+    captured_at: Optional[datetime.datetime],
+    finished_at: datetime.datetime,
+    outcome: str,
+    stage: str,
+    reason_code: str,
+    reason: str,
+    checks: Mapping[str, Any],
+    capture_method: Optional[str],
+    retry_planned: bool,
+) -> Path:
+    """Move a failed attempt into a collision-safe evidence bundle."""
+    if outcome not in {"rejected", "unverified", "capture_error"}:
+        raise ValueError(f"invalid failed-attempt outcome: {outcome}")
+    if image_path is not None and image_path.is_symlink():
+        raise OSError("refusing to archive a symbolic-link capture attempt")
+
+    attempt_id = str(uuid.uuid4())
+    safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(intended_filename).stem)
+    timestamp = finished_at.astimezone(datetime.timezone.utc).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+    resolved_output_dir = output_dir.resolve()
+    rejected_dir = output_dir / REJECTED_CAPTURE_DIR_NAME
+    if rejected_dir.is_symlink():
+        raise OSError("refusing to use a symbolic-link rejected archive")
+    rejected_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if rejected_dir.resolve().parent != resolved_output_dir:
+        raise OSError("rejected archive resolves outside the capture output directory")
+    os.chmod(rejected_dir, 0o700)
+
+    day_dir = rejected_dir / attempt_started_at.strftime("%Y-%m-%d")
+    if day_dir.is_symlink():
+        raise OSError("refusing to use a symbolic-link rejected date directory")
+    day_dir.mkdir(mode=0o700, exist_ok=True)
+    if day_dir.resolve().parent != rejected_dir.resolve():
+        raise OSError("rejected date directory resolves outside the archive")
+    os.chmod(day_dir, 0o700)
+
+    bundle_dir = day_dir / (
+        f"{safe_stem}__attempt-{attempt_number:02d}__{timestamp}__{attempt_id}"
+    )
+    bundle_dir.mkdir(mode=0o700, exist_ok=False)
+    os.chmod(bundle_dir, 0o700)
+
+    image_metadata = _capture_artifact_image_metadata(image_path, capture_method)
+    metadata = {
+        "schema_version": REJECTED_CAPTURE_SCHEMA_VERSION,
+        "artifact_kind": "rejected_capture_attempt",
+        "attempt_id": attempt_id,
+        "outcome": outcome,
+        "stage": stage,
+        "reason_code": reason_code,
+        "reason": _safe_metadata_text(reason),
+        "series": series,
+        "intended_filename": Path(intended_filename).name,
+        "attempt_number": attempt_number,
+        "max_attempts": max_attempts,
+        "attempt_started_at": attempt_started_at.isoformat(),
+        "captured_at": captured_at.isoformat() if captured_at else None,
+        "finished_at": finished_at.isoformat(),
+        "app_version": __version__,
+        "retry_planned": retry_planned,
+        "image": image_metadata,
+        "checks": _archived_check_metadata(checks),
+    }
+
+    metadata_path = bundle_dir / "metadata.json"
+    temporary_metadata_path = bundle_dir / ".metadata.json.tmp"
+    try:
+        with temporary_metadata_path.open("x", encoding="utf-8") as metadata_file:
+            os.fchmod(metadata_file.fileno(), 0o600)
+            json.dump(
+                metadata,
+                metadata_file,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            metadata_file.write("\n")
+            metadata_file.flush()
+            os.fsync(metadata_file.fileno())
+        if image_metadata is not None and image_path is not None:
+            archived_image_path = bundle_dir / image_metadata["filename"]
+            os.replace(image_path, archived_image_path)
+            os.chmod(archived_image_path, 0o600)
+        os.replace(temporary_metadata_path, metadata_path)
+    except Exception:
+        if image_path is None or image_path.is_file():
+            temporary_metadata_path.unlink(missing_ok=True)
+        raise
+    return bundle_dir
+
+
+def _publish_capture_without_overwrite(
+    attempt_path: Path,
+    target_path: Path,
+) -> bool:
+    """Atomically publish one regular file without replacing an existing name."""
+    if attempt_path.is_symlink():
+        raise OSError("refusing to publish a symbolic-link capture attempt")
+    try:
+        os.link(attempt_path, target_path)
+    except FileExistsError:
+        return False
+    try:
+        attempt_path.unlink()
+    except OSError as exc:
+        logger.warning(
+            "Published capture but could not remove its temporary hard link: %s",
+            exc,
+        )
+    return True
 
 
 def _prune_old_files(
@@ -1177,12 +1508,17 @@ def _apply_optional_ai_validation(
     captured_at: datetime.datetime,
     config: Mapping[str, Any],
     inspector=None,
-) -> None:
-    """Run optional OpenAI image inspection and enforce it only when requested."""
+) -> Optional[ai_validation.AIInspection]:
+    """Run optional OpenAI inspection; enabled inspection is always a gate."""
     if not config.get("enabled", False):
-        return
+        return None
 
     mode = config.get("mode", ai_validation.DEFAULT_MODE)
+    if mode == "advisory":
+        logger.warning(
+            "AI validation mode 'advisory' is deprecated and now behaves as "
+            "'enforce': only an AI pass can publish an official capture"
+        )
     inspect = ai_validation.inspect_capture if inspector is None else inspector
     try:
         result = inspect(
@@ -1191,31 +1527,80 @@ def _apply_optional_ai_validation(
             config=config,
         )
     except ai_validation.AIValidationError as exc:
-        if mode == "enforce":
-            raise CaptureValidationError(
-                f"AI validation could not complete: {exc}"
-            ) from exc
-        logger.warning("AI validation unavailable; keeping local result: %s", exc)
-        return
+        raise CaptureValidationError(
+            "AI validation could not complete",
+            outcome="unverified",
+            reason_code="ai_validation_unavailable",
+            details={
+                "ai_validation": {
+                    "status": "error",
+                    "model": config.get("model", ai_validation.DEFAULT_MODEL),
+                    "error_type": type(exc).__name__,
+                }
+            },
+        ) from None
 
     logger.info(
         "AI capture validation: decision=%s confidence=%.2f "
-        "timestamp_status=%s observed_timestamp=%s delta=%s summary=%s",
+        "timestamp_status=%s observed_timestamp=%s delta=%s",
         result.decision,
         result.confidence,
         result.timestamp_status,
-        result.observed_timestamp or "n/a",
+        (
+            result.observed_timestamp
+            if result.timestamp_delta_seconds is not None
+            else "n/a"
+        ),
         _format_optional_seconds(result.timestamp_delta_seconds),
-        result.summary,
     )
+    ai_details = {
+        "status": "pass",
+        "model": config.get("model", ai_validation.DEFAULT_MODEL),
+        "decision": result.decision,
+        "confidence": result.confidence,
+        "timestamp_status": result.timestamp_status,
+        "observed_timestamp": (
+            result.observed_timestamp
+            if result.timestamp_delta_seconds is not None
+            else None
+        ),
+        "timestamp_delta_seconds": result.timestamp_delta_seconds,
+    }
     rejection = result.rejection_reason(
         require_timestamp=config.get("require_timestamp", False),
     )
     if not rejection:
-        return
-    if mode == "enforce":
-        raise CaptureValidationError(rejection)
-    logger.warning("AI validation advisory: %s", rejection)
+        return result
+
+    unverified = result.decision == "uncertain" or (
+        result.decision == "pass"
+        and config.get("require_timestamp", False)
+        and result.timestamp_status in {"not_visible", "unreadable"}
+    )
+    ai_details["status"] = "unverified" if unverified else "fail"
+    if result.decision == "uncertain":
+        reason_code = "ai_decision_uncertain"
+    elif result.timestamp_status in {"stale", "future"}:
+        reason_code = f"ai_timestamp_{result.timestamp_status}"
+    elif unverified:
+        reason_code = "ai_required_timestamp_unverified"
+    else:
+        reason_code = "ai_frame_rejected"
+    fixed_reason = {
+        "ai_decision_uncertain": "AI could not verify the captured frame",
+        "ai_timestamp_stale": "AI-observed timestamp is stale",
+        "ai_timestamp_future": "AI-observed timestamp is in the future",
+        "ai_required_timestamp_unverified": (
+            "AI could not verify the required visible timestamp"
+        ),
+        "ai_frame_rejected": "AI rejected the captured frame",
+    }[reason_code]
+    raise CaptureValidationError(
+        fixed_reason,
+        outcome="unverified" if unverified else "rejected",
+        reason_code=reason_code,
+        details={"ai_validation": ai_details},
+    )
 
 
 def _video_frame_status(driver) -> Dict[str, Any]:
@@ -1396,14 +1781,34 @@ def _save_video_canvas_screenshot(
                 "YouTube source resolution dropped below the configured minimum "
                 f"before canvas capture (observed={result.get('sourceWidth', 0)}x"
                 f"{result.get('sourceHeight', 0)}, "
-                f"minimum={minimum_source_width}x{minimum_source_height})"
+                f"minimum={minimum_source_width}x{minimum_source_height})",
+                reason_code="source_resolution_dropped_before_capture",
+                details={
+                    "source_resolution": {
+                        "status": "fail",
+                        "result": "below_minimum",
+                        "width": int(result.get("sourceWidth") or 0),
+                        "height": int(result.get("sourceHeight") or 0),
+                        "minimum_width": minimum_source_width,
+                        "minimum_height": minimum_source_height,
+                    }
+                },
             )
         if reason in {"video element not found", "video frame is not ready"}:
             raise CaptureValidationError(
                 "YouTube video became unavailable before canvas capture "
                 f"(reason={reason}, readyState={result.get('readyState')}, "
                 f"source={result.get('sourceWidth', 0)}x"
-                f"{result.get('sourceHeight', 0)})"
+                f"{result.get('sourceHeight', 0)})",
+                reason_code="source_frame_unavailable_before_capture",
+                details={
+                    "source_resolution": {
+                        "status": "fail",
+                        "result": "not_ready",
+                        "width": int(result.get("sourceWidth") or 0),
+                        "height": int(result.get("sourceHeight") or 0),
+                    }
+                },
             )
         logger.warning("video canvas screenshot failed: %s", result)
         return False
@@ -1411,7 +1816,7 @@ def _save_video_canvas_screenshot(
     data_url = result.get("dataUrl") or ""
     try:
         _, encoded = data_url.split(",", 1)
-        target_path.write_bytes(base64.b64decode(encoded))
+        _write_private_capture_bytes(target_path, base64.b64decode(encoded))
     except Exception as exc:
         logger.warning("Failed to write canvas screenshot: %s", exc)
         return False
@@ -1442,6 +1847,11 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
     chrome_cfg = config.get("chrome", {})
     capture_cfg = config.get("capture", {})
     schedule_cfg = config.get("schedule", {})
+    series = file_prefix.rstrip("_-")
+    if not series or not CAPTURE_NAME_RE.fullmatch(series):
+        raise ValueError(
+            "file_prefix must contain only letters, numbers, underscores, and hyphens"
+        )
 
     embed_url = config.get("embed_url", DEFAULT_EMBED_URL)
     driver_path = chrome_cfg.get("driver_path", DEFAULT_DRIVER_PATH)
@@ -1456,7 +1866,10 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
     if max_disk_mb is not None and max_disk_mb <= 0:
         raise ValueError("max_disk_mb must be > 0")
 
-    max_retries = _validate_positive("max_retries", capture_cfg.get("max_retries")) or DEFAULT_MAX_RETRIES
+    max_attempts = _validate_positive(
+        "max_retries",
+        capture_cfg.get("max_retries"),
+    ) or DEFAULT_MAX_RETRIES
     retry_delay = capture_cfg.get("retry_delay_sec", DEFAULT_RETRY_DELAY_SEC)
     if retry_delay is None or retry_delay < 0:
         retry_delay = DEFAULT_RETRY_DELAY_SEC
@@ -1474,11 +1887,34 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
         capture_cfg.get("frame_min_luminance_stddev", 10),
     )
     source_resolution = _source_resolution_settings(capture_cfg)
+    ai_config = capture_cfg.get("ai_validation", {})
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, max_attempts + 1):
         driver = None
         wrapper_httpd = None
-        attempt_path = None
+        attempt_started_at = datetime.datetime.now(tzinfo)
+        if is_test:
+            filename = f"{file_prefix}{attempt_started_at.strftime('%Y%m%d_%H%M%S')}.png"
+        else:
+            filename = f"{file_prefix}{attempt_started_at.strftime('%Y%m%d_%H%M')}.png"
+        target_path = output_dir / filename
+        attempt_path = output_dir / (
+            f".{series}.attempt-{attempt}-{uuid.uuid4().hex}.png"
+        )
+        stage = "browser"
+        captured_at = None
+        capture_method = None
+        preserve_unarchived_attempt = False
+        checks: Dict[str, Any] = {
+            "live_edge": {"status": "not_run"},
+            "source_resolution": {"status": "not_run"},
+            "image_quality": {
+                "status": "not_run" if frame_validation else "disabled"
+            },
+            "ai_validation": {
+                "status": "not_run" if ai_config.get("enabled", False) else "disabled"
+            },
+        }
         try:
             options = Options()
             if chrome_cfg.get("headless", True):
@@ -1538,14 +1974,7 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
             finally:
                 driver.switch_to.default_content()
 
-            now = datetime.datetime.now(tzinfo)
-            if is_test:
-                filename = f"{file_prefix}{now.strftime('%Y%m%d_%H%M%S')}.png"
-            else:
-                filename = f"{file_prefix}{now.strftime('%Y%m%d_%H%M')}.png"
-            target_path = output_dir / filename
-            attempt_path = output_dir / f".{target_path.stem}.attempt-{os.getpid()}-{attempt}{target_path.suffix}"
-
+            stage = "live_edge"
             try:
                 iframe_element = WebDriverWait(driver, 5).until(
                     lambda d: d.find_element(By.CSS_SELECTOR, "iframe#ytplayer")
@@ -1563,9 +1992,30 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                             live_edge_max_lag,
                             require_verification=live_edge_require_verification,
                         )
+                        checks["live_edge"] = {
+                            "status": "fail" if live_edge_error else "pass",
+                            "is_live": live_status.get("isLive"),
+                            "control_present": live_status.get("liveControlPresent"),
+                            "control_kind": live_status.get("liveControlKind"),
+                            "displayed_lag_seconds": live_status.get(
+                                "afterLiveControlLagSec",
+                                live_status.get("liveControlLagSec"),
+                            ),
+                            "within_tolerance": live_status.get(
+                                "afterLiveControlWithinTolerance",
+                                live_status.get("liveControlWithinTolerance"),
+                            ),
+                            "seeked": live_status.get("seeked", False),
+                        }
                         if live_edge_error:
-                            raise CaptureValidationError(live_edge_error)
+                            raise CaptureValidationError(
+                                live_edge_error,
+                                reason_code="live_edge_validation_failed",
+                            )
+                    else:
+                        checks["live_edge"] = {"status": "disabled"}
                     _hide_youtube_player_ui(driver)
+                    stage = "source_resolution"
                     frame_status = _wait_for_youtube_video_frame(
                         driver,
                         source_resolution["wait_sec"],
@@ -1597,27 +2047,72 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                         frame_status,
                         source_resolution,
                     )
+                    checks["source_resolution"] = {
+                        "status": "fail" if resolution_error else "pass",
+                        "result": resolution_result,
+                        "width": int(frame_status.get("videoWidth") or 0),
+                        "height": int(frame_status.get("videoHeight") or 0),
+                        "preferred_width": source_resolution["preferred_width"],
+                        "preferred_height": source_resolution["preferred_height"],
+                        "minimum_width": source_resolution["minimum_width"],
+                        "minimum_height": source_resolution["minimum_height"],
+                    }
                     if resolution_error:
-                        raise CaptureValidationError(resolution_error)
-                    if not _save_video_canvas_screenshot(
+                        raise CaptureValidationError(
+                            resolution_error,
+                            reason_code="source_resolution_below_minimum",
+                        )
+                    stage = "screenshot"
+                    if _save_video_canvas_screenshot(
                         driver,
                         attempt_path,
                         minimum_source_width=source_resolution["minimum_width"],
                         minimum_source_height=source_resolution["minimum_height"],
                     ):
+                        capture_method = "canvas"
+                        _validate_screenshot_write(
+                            attempt_path,
+                            saved=True,
+                            capture_method=capture_method,
+                        )
+                    else:
                         fallback_status = _video_frame_status(driver)
                         fallback_resolution_error = _source_resolution_validation_error(
                             fallback_status,
                             source_resolution,
                         )
                         if fallback_resolution_error:
-                            raise CaptureValidationError(fallback_resolution_error)
+                            checks["source_resolution"].update(
+                                {
+                                    "status": "fail",
+                                    "result": _source_resolution_result(
+                                        fallback_status,
+                                        source_resolution,
+                                    ),
+                                    "width": int(
+                                        fallback_status.get("videoWidth") or 0
+                                    ),
+                                    "height": int(
+                                        fallback_status.get("videoHeight") or 0
+                                    ),
+                                }
+                            )
+                            raise CaptureValidationError(
+                                fallback_resolution_error,
+                                reason_code="source_resolution_dropped_before_capture",
+                            )
                         video_element = driver.find_element(By.CSS_SELECTOR, "video.html5-main-video, video")
                         video_size = video_element.size
                         video_width = video_size.get("width", 0)
                         video_height = video_size.get("height", 0)
                         if video_width and video_height:
-                            video_element.screenshot(str(attempt_path))
+                            _prepare_private_capture_file(attempt_path)
+                            capture_method = "video_element"
+                            _validate_screenshot_write(
+                                attempt_path,
+                                saved=video_element.screenshot(str(attempt_path)),
+                                capture_method=capture_method,
+                            )
                             logger.info("Saved video element screenshot to %s", attempt_path)
                         else:
                             raise WebDriverException("video element size returned zero")
@@ -1628,7 +2123,21 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                         source_resolution,
                     )
                     if fallback_resolution_error:
-                        raise CaptureValidationError(fallback_resolution_error) from exc
+                        checks["source_resolution"].update(
+                            {
+                                "status": "fail",
+                                "result": _source_resolution_result(
+                                    fallback_status,
+                                    source_resolution,
+                                ),
+                                "width": int(fallback_status.get("videoWidth") or 0),
+                                "height": int(fallback_status.get("videoHeight") or 0),
+                            }
+                        )
+                        raise CaptureValidationError(
+                            fallback_resolution_error,
+                            reason_code="source_resolution_invalid_during_fallback",
+                        ) from exc
                     logger.warning("video screenshot failed (%s), falling back to iframe", exc)
                     driver.switch_to.default_content()
                     iframe_size = iframe_element.size
@@ -1637,57 +2146,191 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                     if not iframe_width or not iframe_height:
                         raise WebDriverException("iframe size returned zero")
                     try:
-                        iframe_element.screenshot(str(attempt_path))
+                        _prepare_private_capture_file(attempt_path)
+                        capture_method = "iframe"
+                        _validate_screenshot_write(
+                            attempt_path,
+                            saved=iframe_element.screenshot(str(attempt_path)),
+                            capture_method=capture_method,
+                        )
                         logger.info("Saved iframe screenshot to %s", attempt_path)
                     except WebDriverException as exc:
                         logger.warning("iframe screenshot failed (%s), falling back to full screen", exc)
-                        driver.save_screenshot(str(attempt_path))
+                        _prepare_private_capture_file(attempt_path)
+                        capture_method = "full_screen"
+                        _validate_screenshot_write(
+                            attempt_path,
+                            saved=driver.save_screenshot(str(attempt_path)),
+                            capture_method=capture_method,
+                        )
                 finally:
                     driver.switch_to.default_content()
             except NoSuchElementException:
-                raise CaptureValidationError("YouTube iframe is unavailable")
+                raise CaptureValidationError(
+                    "YouTube iframe is unavailable",
+                    reason_code="youtube_iframe_unavailable",
+                )
 
+            captured_at = datetime.datetime.now(tzinfo)
+            if is_test:
+                filename = f"{file_prefix}{captured_at.strftime('%Y%m%d_%H%M%S')}.png"
+            else:
+                filename = f"{file_prefix}{captured_at.strftime('%Y%m%d_%H%M')}.png"
+            target_path = output_dir / filename
+            stage = "image_quality"
             if frame_validation:
                 frame_error = _capture_image_validation_error(
                     attempt_path,
                     frame_min_luminance_stddev,
                 )
                 if frame_error:
-                    raise CaptureValidationError(frame_error)
+                    checks["image_quality"] = {"status": "fail"}
+                    raise CaptureValidationError(
+                        frame_error,
+                        reason_code="image_quality_validation_failed",
+                    )
+                checks["image_quality"] = {"status": "pass"}
 
-            _apply_optional_ai_validation(
+            stage = "ai_validation"
+            ai_result = _apply_optional_ai_validation(
                 attempt_path,
-                captured_at=datetime.datetime.now(tzinfo),
-                config=capture_cfg.get("ai_validation", {}),
+                captured_at=captured_at,
+                config=ai_config,
             )
+            if ai_result is not None:
+                checks["ai_validation"] = {
+                    "status": "pass",
+                    "model": ai_config.get("model", ai_validation.DEFAULT_MODEL),
+                    "decision": ai_result.decision,
+                    "confidence": ai_result.confidence,
+                    "timestamp_status": ai_result.timestamp_status,
+                    "observed_timestamp": (
+                        ai_result.observed_timestamp
+                        if ai_result.timestamp_delta_seconds is not None
+                        else None
+                    ),
+                    "timestamp_delta_seconds": ai_result.timestamp_delta_seconds,
+                }
 
-            if target_path.exists():
-                logger.warning("Capture already exists; preserving original: %s", target_path)
-                attempt_path.unlink(missing_ok=True)
-            else:
-                os.replace(attempt_path, target_path)
+            stage = "publication"
+            if _publish_capture_without_overwrite(attempt_path, target_path):
                 logger.info("Published validated capture to %s", target_path)
+            else:
+                raise FileExistsError(
+                    "official capture filename already exists; original preserved"
+                )
 
             _prune_old_files(output_dir, file_prefix, max_files, max_disk_mb)
             return True
         except (WebDriverException, TimeoutException, Exception) as exc:
-            logger.exception("Capture attempt %s/%s failed: %s", attempt, max_retries, exc)
-            if attempt < max_retries:
+            finished_at = datetime.datetime.now(tzinfo)
+            retry_planned = attempt < max_attempts
+            try:
+                _make_capture_attempt_private(attempt_path)
+            except OSError as permission_error:
+                logger.warning(
+                    "Could not set private permissions on failed temporary capture (%s)",
+                    type(permission_error).__name__,
+                )
+            if isinstance(exc, CaptureValidationError):
+                outcome = exc.outcome
+                reason_code = exc.reason_code or f"{stage}_validation_failed"
+                reason = (
+                    str(exc)
+                    if not reason_code.startswith("ai_")
+                    else {
+                        "ai_validation_unavailable": "AI validation could not complete",
+                        "ai_decision_uncertain": "AI could not verify the captured frame",
+                        "ai_timestamp_stale": "AI-observed timestamp is stale",
+                        "ai_timestamp_future": "AI-observed timestamp is in the future",
+                        "ai_required_timestamp_unverified": (
+                            "AI could not verify the required visible timestamp"
+                        ),
+                        "ai_frame_rejected": "AI rejected the captured frame",
+                    }.get(reason_code, "AI validation failed")
+                )
+                for check_name in checks:
+                    if check_name in exc.details:
+                        checks[check_name] = exc.details[check_name]
+                if reason_code.startswith("source_"):
+                    stage = "source_resolution"
+            else:
+                outcome = "capture_error"
+                exception_code = re.sub(
+                    r"[^a-z0-9]+",
+                    "_",
+                    type(exc).__name__.lower(),
+                ).strip("_")
+                reason_code = f"{stage}_{exception_code or 'error'}"
+                reason = f"{type(exc).__name__} while processing stage {stage}"
+
+            check_key = {
+                "live_edge": "live_edge",
+                "source_resolution": "source_resolution",
+                "image_quality": "image_quality",
+                "ai_validation": "ai_validation",
+            }.get(stage)
+            if check_key and checks[check_key].get("status") == "not_run":
+                checks[check_key] = {
+                    "status": "unverified" if outcome == "unverified" else "fail"
+                }
+
+            logger.exception(
+                "Capture attempt %s/%s failed at %s: %s",
+                attempt,
+                max_attempts,
+                stage,
+                exc,
+            )
+            try:
+                bundle_dir = _archive_failed_capture_attempt(
+                    output_dir=output_dir,
+                    image_path=attempt_path,
+                    intended_filename=target_path.name,
+                    series=series,
+                    attempt_number=attempt,
+                    max_attempts=max_attempts,
+                    attempt_started_at=attempt_started_at,
+                    captured_at=captured_at,
+                    finished_at=finished_at,
+                    outcome=outcome,
+                    stage=stage,
+                    reason_code=reason_code,
+                    reason=reason,
+                    checks=checks,
+                    capture_method=capture_method,
+                    retry_planned=retry_planned,
+                )
+                logger.warning(
+                    "Preserved failed capture attempt evidence: %s",
+                    bundle_dir,
+                )
+            except Exception:
+                preserve_unarchived_attempt = attempt_path.is_file()
+                logger.exception(
+                    "Could not archive failed capture attempt; temporary image preserved=%s",
+                    preserve_unarchived_attempt,
+                )
+            if retry_planned:
                 time.sleep(retry_delay)
         finally:
-            if attempt_path is not None:
+            if attempt_path.is_file() and not preserve_unarchived_attempt:
                 try:
                     attempt_path.unlink(missing_ok=True)
                 except OSError:
                     logger.warning("Could not remove temporary capture: %s", attempt_path)
-            try:
-                if driver:
+            if driver:
+                try:
                     driver.quit()
-            finally:
-                if wrapper_httpd:
+                except Exception as exc:
+                    logger.warning("Could not close browser after capture attempt: %s", exc)
+            if wrapper_httpd:
+                try:
                     wrapper_httpd.shutdown()
                     wrapper_httpd.server_close()
-    logger.error("Capture failed after %s attempts", max_retries)
+                except Exception as exc:
+                    logger.warning("Could not close capture wrapper server: %s", exc)
+    logger.error("Capture failed after %s attempts", max_attempts)
     return False
 
 ##############################
@@ -1863,7 +2506,11 @@ def main(argv=None, *, prog=None):
     parser.add_argument("--window-size", type=str, help="ウィンドウサイズ (例 1920,1080)")
     parser.add_argument("--page-load-timeout", type=int, help="ページロードのタイムアウト秒数")
     parser.add_argument("--output-dir", type=str, help="キャプチャ保存先ディレクトリ")
-    parser.add_argument("--max-retries", type=int, help="キャプチャリトライ回数")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        help="初回を含むキャプチャ総試行回数",
+    )
     parser.add_argument("--retry-delay-sec", type=int, help="リトライ間隔（秒）")
     parser.add_argument("--max-files", type=int, help="prefix ごとの最大保存枚数")
     parser.add_argument("--max-disk-mb", type=float, help="出力ディレクトリのサイズ上限（MB）")
@@ -1883,7 +2530,7 @@ def main(argv=None, *, prog=None):
     parser.add_argument(
         "--ai-validation-mode",
         choices=sorted(ai_validation.VALID_MODES),
-        help="AI判定をログだけにするか、保存条件として強制するか",
+        help="AI保存条件 (advisory は互換用で enforce と同じ動作)",
     )
     parser.add_argument(
         "--ai-model",
@@ -1899,7 +2546,7 @@ def main(argv=None, *, prog=None):
         "--ai-require-timestamp",
         dest="ai_require_timestamp",
         action="store_true",
-        help="AI強制モードで読み取り可能な現在時刻を必須にする",
+        help="AI検査で読み取り可能な現在時刻を必須にする",
     )
     timestamp_group.add_argument(
         "--ai-allow-missing-timestamp",

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from ytlive_snapshot import capture
 
@@ -268,6 +268,54 @@ class SourceResolutionTest(unittest.TestCase):
                 )
 
             self.assertFalse(path.exists())
+
+    def test_canvas_capture_is_private_from_creation(self):
+        class Driver:
+            def set_script_timeout(self, timeout):
+                pass
+
+            def execute_async_script(self, script, *args):
+                return {
+                    "ok": True,
+                    "width": 640,
+                    "height": 360,
+                    "sourceWidth": 1280,
+                    "sourceHeight": 720,
+                    "dataUrl": "data:image/png;base64,cG5n",
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "frame.png"
+
+            self.assertTrue(
+                capture._save_video_canvas_screenshot(
+                    Driver(),
+                    path,
+                    minimum_source_width=640,
+                    minimum_source_height=360,
+                )
+            )
+
+            self.assertEqual(path.read_bytes(), b"png")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_screenshot_backend_cannot_publish_false_or_empty_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "frame.png"
+            capture._prepare_private_capture_file(path)
+
+            with self.assertRaisesRegex(WebDriverException, "returned false"):
+                capture._validate_screenshot_write(
+                    path,
+                    saved=False,
+                    capture_method="video_element",
+                )
+            with self.assertRaisesRegex(WebDriverException, "empty capture"):
+                capture._validate_screenshot_write(
+                    path,
+                    saved=True,
+                    capture_method="video_element",
+                )
 
 
 class PlayRequestTest(unittest.TestCase):

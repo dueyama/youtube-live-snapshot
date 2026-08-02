@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.3.0 - 2026-08-02
+
+- Publish an official image only after every enabled mechanical and AI check
+  passes.
+- Preserve failed attempts on a best-effort basis under the output directory's
+  `rejected/` archive, with a safe JSON record and the attempted PNG when one
+  exists; keep the hidden attempt PNG if the archive itself is unavailable.
+- Distinguish confirmed `rejected` frames from `unverified` AI results and
+  pre-image `capture_error` failures.
+- Keep all failure types within one bounded attempt budget; `max_retries: 3`
+  means three total attempts including the first.
+- Make `enforce` the default AI mode and treat the former `advisory` value as a
+  deprecated enforcing alias so an AI failure can no longer become official.
+- Keep rejected evidence outside official capture discovery, calendar input,
+  and normal capture pruning, with no automatic deletion.
+- Preserve an existing official filename on collision, archive the newly
+  validated but unpublished attempt, and never report that collision as a
+  successful publication.
+
 ## 3.2.1 - 2026-08-02
 
 - Wait up to 30 seconds for a preferred `1280x720` YouTube source frame.

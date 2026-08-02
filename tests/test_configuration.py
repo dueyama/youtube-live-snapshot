@@ -16,6 +16,10 @@ class ConfigurationTest(unittest.TestCase):
             capture.DEFAULT_CONFIG["capture"]["ai_validation"]["enabled"]
         )
         self.assertEqual(
+            capture.DEFAULT_CONFIG["capture"]["ai_validation"]["mode"],
+            "enforce",
+        )
+        self.assertEqual(
             capture.DEFAULT_CONFIG["capture"]["source_resolution"],
             {
                 "minimum_width": 640,

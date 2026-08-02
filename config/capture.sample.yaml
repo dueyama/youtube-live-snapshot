@@ -1,4 +1,4 @@
-# YouTube Live Snapshot v3.2.1 sample configuration
+# YouTube Live Snapshot v3.3.0 sample configuration
 embed_url: null  # required: YouTube watch/live/embed URL
 chrome:
   driver_path: /usr/bin/chromedriver
@@ -7,7 +7,7 @@ chrome:
   page_load_timeout_sec: 30
 capture:
   output_dir: ./captures
-  max_retries: 3
+  max_retries: 3                       # total attempts including the first
   retry_delay_sec: 10
   live_edge_seek: true
   live_edge_max_lag_sec: 30
@@ -23,7 +23,7 @@ capture:
   ai_validation:
     enabled: false                      # opt in; no API request is made by default
     model: gpt-5.6-luna
-    mode: advisory                      # advisory logs; enforce can reject a capture
+    mode: enforce                       # legacy advisory is an enforcing alias
     detail: original                    # recommended when reading a small timestamp
     api_key_env: OPENAI_API_KEY         # key value stays in the environment
     timeout_sec: 45

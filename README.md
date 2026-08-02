@@ -206,7 +206,23 @@ ytlive-snapshot capture \
 
 For continuous operation, run the foreground command from systemd or another service manager. Keep the service definition, boot ordering, credentials, and host lifecycle in the host-management layer. See [RUNBOOK.md](RUNBOOK.md).
 
-Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only a validated image is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
+Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only an image that passes every enabled check is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
+
+Every failure consumes the same bounded attempt budget. `max_retries: 3` means
+three total attempts including the first, not one initial attempt plus three
+more. There is no separate AI retry loop. On a best-effort basis, each failed
+attempt is preserved under `OUTPUT_DIR/rejected/YYYY-MM-DD/.../` as
+`metadata.json` and, when a screenshot already exists, `capture.png`. The
+metadata records the failed
+stage, safe diagnostic fields, and whether another attempt was scheduled; it
+does not copy the configured stream URL, coordinates, API key, configuration,
+host path, raw API response, or AI-generated free-form prose. On POSIX systems,
+evidence bundles use mode `0700` and their files use `0600`. Rejected evidence
+is outside the official root image glob, is never used by calendar rendering or
+normal pruning, and is not deleted automatically, so monitor its disk use. If
+the archive itself cannot be written, the tool logs that failure and preserves
+any hidden temporary PNG in the output directory instead of deleting the only
+evidence; a JSON record cannot be guaranteed when storage is unavailable.
 
 The PNG canvas dimensions are not proof of source quality: a `426x240` video can otherwise be enlarged into a `1666x937` PNG. By default, the tool therefore waits up to 30 seconds for a preferred `1280x720` source. If that quality is unavailable, it accepts a current frame of at least `640x360`; anything lower fails the attempt and the normal retry opens a fresh browser page. The source dimensions are checked again at the instant of canvas capture, so screenshot fallbacks cannot bypass the limit. This is a deterministic `videoWidth`/`videoHeight` check and remains active without AI. Streams with different quality constraints can tune `capture.source_resolution`.
 
@@ -258,19 +274,22 @@ capture:
   ai_validation:
     enabled: true
     model: gpt-5.6-luna
-    mode: advisory
+    mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
     timestamp_tolerance_sec: 120
     require_timestamp: false
 ```
 
-Start with `mode: advisory`: the structured result is logged, but an API
-failure or negative verdict does not discard the locally valid image. After
-reviewing representative results, `mode: enforce` makes an AI failure,
-uncertain verdict, stale visible timestamp, or required-but-missing timestamp
-reject that attempt and enter the normal retry path. Streams without a visible
-camera clock should leave `require_timestamp: false`.
+When AI is enabled, it is part of the publication gate: only `decision=pass`
+with acceptable timestamp conditions can become an official capture. A clear
+frame failure or stale/future timestamp is recorded as `rejected`; an uncertain
+verdict, API failure, invalid response, or required-but-unreadable timestamp is
+recorded as `unverified`. Both enter the same bounded retry path and retain
+their evidence. The former `advisory` value is accepted temporarily for
+configuration compatibility, emits a deprecation warning, and now behaves as
+`enforce`; report-only AI review belongs in a separate post-capture audit.
+Streams without a visible camera clock should leave `require_timestamp: false`.
 
 The same settings can be overridden for one run:
 
@@ -279,7 +298,7 @@ ytlive-snapshot capture \
   --config config/capture.yaml \
   --once \
   --ai-validate \
-  --ai-validation-mode advisory \
+  --ai-validation-mode enforce \
   --ai-model gpt-5.6-luna
 ```
 
@@ -553,7 +572,9 @@ ytlive-snapshot capture \
 
 常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義、起動停止、秘密設定、OS管理はホスト管理側で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
 
-保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、検査に合格した画像だけを一時ファイルから永続ファイル名へ移します。これらは既定で有効です。
+保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、有効な検査をすべて通過した画像だけを一時ファイルから正式な永続ファイル名へ移します。これらは既定で有効です。
+
+すべての失敗は、1つの上限付き試行枠を共有します。`max_retries: 3`は初回を含む合計3試行であり、初回に加えて3回ではありません。AI専用の別リトライはありません。失敗した各試行は、可能な限り`出力先/rejected/YYYY-MM-DD/.../`へ保存し、通常は`metadata.json`を、画像生成後なら`capture.png`も残します。設定済みの配信URL、座標、APIキー、設定全体、ホスト固有パス、API応答全文、AIの自由記述は記録へコピーしません。POSIX環境では証拠フォルダを`0700`、ファイルを`0600`にします。不良証拠は正式画像の探索、カレンダー描画、通常の世代削除には混ざらず、自動削除もしないため、ディスク使用量は監視してください。保存領域自体へ書き込めない場合は、その異常をログに記録し、唯一の証拠を削除しないよう隠し一時PNGを出力先へ残します。この場合はJSONを保証できません。
 
 保存PNGの寸法だけでは元映像の品質は分かりません。例えば`426x240`の動画でもcanvasで`1666x937`へ拡大できます。そのため既定では、最大30秒間、元映像が優先値`1280x720`になるのを待ちます。そこまで上がらなくても現在の映像が最低`640x360`以上なら採用し、未満ならその回を不合格として新しいブラウザページで通常の再試行を行います。canvas保存の瞬間にも元解像度を再確認するため、代替スクリーンショット経路で条件を迂回できません。これは`videoWidth`と`videoHeight`を使うAI非依存の機械判定です。配信事情が異なる場合は`capture.source_resolution`で調整できます。
 
@@ -581,14 +602,14 @@ capture:
   ai_validation:
     enabled: true
     model: gpt-5.6-luna
-    mode: advisory
+    mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
     timestamp_tolerance_sec: 120
     require_timestamp: false
 ```
 
-最初は`mode: advisory`を推奨します。判定結果はログへ出しますが、API障害やAIの不合格判定だけで画像を捨てません。実画像で結果を確認した後、`mode: enforce`にすると、不合格・判断不能・古い画像内時刻・必須時刻を読めない場合を通常の再試行へ回せます。時刻表示のない配信では`require_timestamp: false`のまま使用します。
+AIを有効にすると、その判定も正式保存の必須条件になります。`decision=pass`で時刻条件も満たした画像だけが正式画像です。明確な画面不良や古い・未来の時刻は`rejected`、判断不能、API障害、不正な応答、必須時刻を読めない場合は`unverified`として証拠を残し、どちらも同じ上限付き試行枠で再撮影します。以前の`advisory`値は設定互換のため一時的に受理しますが、非推奨警告を出して`enforce`と同じ動作をします。ログだけのAI確認は、撮影後の別監査として行う位置付けです。時刻表示のない配信では`require_timestamp: false`のまま使用します。
 
 この機能を有効にした場合だけ、撮影画像がOpenAIへ送信され、API利用料が発生します。リクエストは`store: false`ですが、配信の公開範囲と利用許可は利用者が確認してください。AI検査はローカル検査を補完するもので、信頼できる時刻表示がない画像だけから「現在ライブ中」と完全に証明するものではありません。公式の[画像入力ガイド](https://developers.openai.com/api/docs/guides/images-vision)と[`gpt-5.6-luna`モデル情報](https://developers.openai.com/api/docs/models/gpt-5.6-luna)も参照してください。
 
