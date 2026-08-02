@@ -8,7 +8,7 @@ YouTube Live Snapshot is a standalone command-line tool for capturing still fram
 
 The companion `render` command turns the accumulated snapshots into monthly and annual visual archives, including Japanese or English calendar layouts, average-color views, PNG/JPEG images, and PDFs.
 
-The core service does not require an AI agent. When used with Codex or another authorized agent, routine work such as checking service health, finding missing capture dates, reviewing logs, and rendering a new calendar can also be requested in natural language.
+The core service does not require an AI agent. With Codex or another AI coding agent, routine work such as checking service health, finding missing capture dates, reviewing logs, and rendering a new calendar can also be requested in natural language.
 
 This is not an official YouTube or Google project.
 
@@ -23,7 +23,7 @@ This is not an official YouTube or Google project.
 - Single-run and short-interval test modes
 - YAML, environment-variable, and CLI configuration
 - Retries, logging, and optional retention limits
-- Preferred and minimum source-resolution checks before publishing a frame
+- Preferred and minimum source-resolution checks before saving a frame
 - Automatic normalization of YouTube watch, share, live, and embed URLs
 - Optional OpenAI vision inspection of frame quality and visible timestamps
 
@@ -51,9 +51,7 @@ Noto Sans CJK JP is bundled for Japanese calendar output. Chromium and ChromeDri
 - **General Linux:** uses the same CLI and is normally managed with systemd or another process supervisor.
 - **macOS:** suitable for local capture, archive rendering, testing, and continuous operation with an appropriate macOS process supervisor.
 
-The application code is portable; most platform differences are limited to installing Chromium, locating ChromeDriver or the browser binary, choosing writable data directories, and configuring a service manager. An authorized AI agent such as Codex can inspect the host, identify the installed browser and Python environment, create the virtual environment, prepare an ignored private configuration, run one isolated test capture, inspect the image, and draft the appropriate systemd or macOS service configuration. This often makes bringing up a new machine a short, guided task rather than a manual porting project.
-
-AI assistance does not bypass operating-system permissions, YouTube embedding restrictions, or the requirement to obtain authorization for the stream. Production service changes and private values should still be reviewed explicitly.
+The application code is portable; most platform differences are limited to installing Chromium, locating ChromeDriver or the browser binary, choosing writable data directories, and configuring a service manager. An AI coding agent such as Codex can help identify the browser and Python environment, create the virtual environment, prepare the configuration, run and inspect a test capture, and draft an appropriate systemd or macOS service definition. This often makes bringing up a new machine a short, guided task rather than a manual porting project.
 
 ## Installation
 
@@ -105,14 +103,14 @@ Important details:
 - A channel URL such as `https://www.youtube.com/@handle/live` does not contain a video ID and is not a supported substitute.
 - If the broadcaster creates a new live event with a new video ID, update `embed_url`.
 - Older examples on the web may use `embed/live_stream?channel=...`; this is not documented by the current YouTube Embedded Player specification and should not be relied on.
-- The video owner must allow embedding. If **Share → Embed** is unavailable or the player reports that embedding is disabled, change the video's YouTube Studio setting or use a stream you are authorized to embed.
+- The video owner must allow embedding. If **Share → Embed** is unavailable or the player reports that embedding is disabled, change the video's YouTube Studio setting or use a video for which embedding is permitted.
 - YouTube's current player documentation defines the standard form as `/embed/VIDEO_ID`. Automatic discovery of the active video for a channel would require a separate YouTube Data API integration and is not implemented here.
 
 See the official [YouTube embed instructions](https://support.google.com/youtube/answer/171780) and [Embedded Player parameters](https://developers.google.com/youtube/player_parameters).
 
 ## Configuration
 
-Copy the public sample to an ignored private configuration file:
+Copy the sample configuration:
 
 ```bash
 cp config/capture.sample.yaml config/capture.yaml
@@ -149,7 +147,7 @@ Configuration precedence is:
 1. CLI options
 2. Environment variables
 3. YAML configuration
-4. Public, non-private defaults
+4. Built-in defaults
 
 Select the YAML file directly or through an environment variable:
 
@@ -160,7 +158,7 @@ YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml \
   ytlive-snapshot capture
 ```
 
-Host-specific values can also be supplied with:
+The same values can also be supplied with environment variables:
 
 ```text
 YTLIVE_SNAPSHOT_EMBED_URL
@@ -171,7 +169,7 @@ YTLIVE_SNAPSHOT_REGION
 YTLIVE_SNAPSHOT_TIMEZONE
 ```
 
-The project does not load `.env` files itself. Pass normal environment variables from systemd, a container, or a shell. Keep real URLs, coordinates, credentials, and host-specific paths out of Git.
+The project does not load `.env` files itself. Pass environment variables from systemd, a container, or a shell, or keep these values in `config/capture.yaml`.
 
 ## Capturing snapshots
 
@@ -204,9 +202,9 @@ ytlive-snapshot capture \
   --no-sunset
 ```
 
-For continuous operation, run the foreground command from systemd or another service manager. Keep service definitions and credentials outside the application directory, and manage startup and shutdown with the operating system's service manager. See [RUNBOOK.md](RUNBOOK.md).
+For continuous operation, run the foreground command from systemd or another service manager. See [RUNBOOK.md](RUNBOOK.md) for a deployment example.
 
-Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only an image that passes every enabled check is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
+Before saving a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only an image that passes every enabled check is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
 
 Every failure consumes the same bounded attempt budget. `max_retries: 3` means
 three total attempts including the first, not one initial attempt plus three
@@ -249,8 +247,8 @@ or judgment errors. The capture service must therefore remain useful and
 predictable without AI. AI does not replace the mechanical LIVE-state check;
 at most, a visible camera timestamp provides independent supporting evidence.
 
-When explicitly enabled, the captured image is sent to the OpenAI Responses
-API before its temporary file is published. The inspector can identify a
+When enabled, the captured image is sent to the OpenAI Responses API before
+its temporary file is moved to the final filename. The inspector can identify a
 blank or obstructed video frame, read a visible camera clock, and compare that
 clock with the expected capture time. It uses `gpt-5.6-luna` by default because
 that model accepts image input and is intended for cost-sensitive workloads;
@@ -261,8 +259,8 @@ The AI prompt accepts overlays in any language and locale. It should not reject
 a frame merely because of its language, and ambiguous date ordering or unclear
 digits are reported as unreadable rather than guessed.
 
-Install the optional dependency, expose the key only through the environment,
-and opt in through the private YAML file:
+Install the optional dependency, set the API key in the environment, and enable
+the inspector in the YAML configuration:
 
 ```bash
 python -m pip install '.[ai]'
@@ -281,7 +279,7 @@ capture:
     require_timestamp: false
 ```
 
-When AI is enabled, it is part of the publication gate: only `decision=pass`
+When AI is enabled, it is part of the final-save gate: only `decision=pass`
 with acceptable timestamp conditions can become an official capture. A clear
 frame failure or stale/future timestamp is recorded as `rejected`; an uncertain
 verdict, API failure, invalid response, or required-but-unreadable timestamp is
@@ -342,7 +340,7 @@ Fixed times and sunset offsets are configuration-only changes. Rules based on su
 
 ## Rendering the archive
 
-Create a private rendering configuration and run it:
+Create a rendering configuration and run it:
 
 ```bash
 cp config/render.sample.yaml config/render.yaml
@@ -399,9 +397,7 @@ Category IDs and output names are restricted to safe relative filenames. Absolut
 
 ## Working with an AI agent
 
-AI is optional: scheduled capture and rendering work as normal commands. With Codex, open this repository as the workspace and grant only the host or SSH access needed for the task.
-
-Example requests:
+AI is optional: scheduled capture and rendering work as normal commands. With Codex, open this repository as the workspace and request tasks such as:
 
 ```text
 Check the service process, recent logs, and latest snapshot timestamp.
@@ -410,11 +406,9 @@ Render a 2026 English calendar and inspect the output.
 Investigate why yesterday's sunset capture ran late.
 ```
 
-The repository's [AGENTS.md](AGENTS.md) tells compatible agents not to delete persistent snapshots, expose private configuration, or operate production services without explicit authorization.
+## Storage and retention
 
-## Data safety
-
-- `captures/`, `captures_test/`, `data/`, `out/`, logs, and private configuration are ignored by Git.
+- Capture, rendering, and log destinations are configurable.
 - Snapshots are deleted only when `max_files` or `max_disk_mb` is explicitly configured.
 - Keep persistent snapshots outside the replaceable application directory.
 - Confirm that you have the right to capture and store the stream and that your use follows the applicable YouTube terms and policies.
@@ -461,9 +455,7 @@ AIエージェントがなくても単独で動作します。Codexなどと組�
 - **一般的なLinux:** 同じCLIを利用し、通常はsystemdなどで常駐化
 - **macOS:** ローカル撮影、描画、テストに利用でき、適切なプロセス管理を用意すれば常時運用も可能
 
-環境ごとの差は、主にChromiumとChromeDriverの導入場所、書き込み可能なデータディレクトリ、サービス管理方法です。Codexなどの許可されたAIエージェントを使えば、OSとブラウザ環境の確認、仮想環境の作成、Git管理外の実設定作成、隔離先への単発撮影、画像確認、systemdまたはmacOS向け常駐設定の下書きまでを対話しながら進められます。そのため、新しいLinux機やMacへの導入は大規模な移植ではなく、比較的短い環境設定作業として扱えます。
-
-ただし、AI支援でもOS権限やYouTubeの埋め込み制限を回避することはできません。実URLや座標、サービス変更は明示的に確認し、本番反映とは分けて扱ってください。
+環境ごとの差は、主にChromiumとChromeDriverの導入場所、書き込み可能なデータディレクトリ、サービス管理方法です。CodexなどのAIコーディングエージェントを使えば、OSとブラウザ環境の確認、仮想環境と設定ファイルの作成、単発撮影と画像確認、systemdまたはmacOS向けサービス定義の作成までを対話しながら進められます。そのため、新しいLinux機やMacへの導入は大規模な移植ではなく、比較的短い環境設定作業として扱えます。
 
 ### YouTube Live URLの取り方
 
@@ -548,7 +540,7 @@ schedule:
   sunset_prefix: sunset
 ```
 
-`embed_url`は必須です。緯度と経度は日の入り撮影を使う場合だけ必須です。実URL、座標、認証情報、ホスト固有パスはGitへ入れないでください。
+`embed_url`は必須です。緯度と経度は日の入り撮影を使う場合だけ必須です。環境ごとの値は`config/capture.yaml`または環境変数で設定できます。
 
 ### 実行
 
@@ -572,7 +564,7 @@ ytlive-snapshot capture \
   --no-sunset
 ```
 
-常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義と認証情報はアプリのディレクトリ外に置き、起動・停止はOSのサービス管理機能で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
+常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。配備例は[RUNBOOK.md](RUNBOOK.md)を参照してください。
 
 保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、有効な検査をすべて通過した画像だけを一時ファイルから正式な永続ファイル名へ移します。これらは既定で有効です。
 
@@ -590,7 +582,7 @@ AI画像検査は**既定では無効**です。通常のインストールで�
 
 任意機能としているのは、有効にすると画像を外部へ送信し、ネットワーク、APIキー、利用料が必要になり、OCRや判断を誤る可能性もあるためです。撮影サービス本体はAIなしでも実用的かつ予測可能に動作しなければなりません。AIは機械的なLIVE状態判定を置き換えず、画像内に信頼できる時計がある場合に独立した補足情報を与えるだけです。
 
-明示的に有効にすると、一時画像を永続ファイル名へ移す前にOpenAI Responses APIへ送り、黒画面やエラー画面、再生コントロールの映り込み、画像内のカメラ時刻を確認できます。既定モデルは、画像入力に対応する低コスト向けの`gpt-5.6-luna`です。小さな時刻表示を読むため、画像詳細は`original`を既定にしています。
+有効にすると、一時画像を永続ファイル名へ移す前にOpenAI Responses APIへ送り、黒画面やエラー画面、再生コントロールの映り込み、画像内のカメラ時刻を確認できます。既定モデルは、画像入力に対応する低コスト向けの`gpt-5.6-luna`です。小さな時刻表示を読むため、画像詳細は`original`を既定にしています。
 
 画像内の文字や日付形式は任意の言語・地域を許容します。言語が異なること自体を不合格理由にせず、日月順や数字を確定できない場合は推測せず`unreadable`として扱います。
 
@@ -666,9 +658,9 @@ ytlive-snapshot render \
   --include-empty-months
 ```
 
-### データ保護
+### 保存と世代管理
 
-- キャプチャ、出力、ログ、実設定はGit管理外です。
+- キャプチャ、描画、ログの保存先は設定できます。
 - `max_files`や`max_disk_mb`を明示しない限り、古い画像を自動削除しません。
 - 永続画像は、入れ替え可能なアプリ配備先と分離してください。
 - 利用者自身が配信映像を取得・保存する権限と適用条件を確認してください。
