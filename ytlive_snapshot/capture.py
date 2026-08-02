@@ -2,6 +2,7 @@ import argparse
 import base64
 import datetime
 import logging
+import math
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 from . import __version__
+from . import ai_validation
 
 try:
     import yaml
@@ -39,6 +41,7 @@ from selenium.common.exceptions import (
 # astral ライブラリ（pip install astral）
 from astral import LocationInfo
 from astral.sun import sun
+from PIL import Image, ImageStat, UnidentifiedImageError
 
 # ##############################
 # デフォルト値の設定
@@ -87,7 +90,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retry_delay_sec": DEFAULT_RETRY_DELAY_SEC,
         "live_edge_seek": True,
         "live_edge_max_lag_sec": 30,
-        "live_edge_offset_sec": 2,
+        "live_edge_require_verification": True,
+        "frame_validation": True,
+        "frame_min_luminance_stddev": 10,
+        "ai_validation": {
+            "enabled": False,
+            "model": ai_validation.DEFAULT_MODEL,
+            "mode": ai_validation.DEFAULT_MODE,
+            "detail": ai_validation.DEFAULT_DETAIL,
+            "api_key_env": ai_validation.DEFAULT_API_KEY_ENV,
+            "timeout_sec": ai_validation.DEFAULT_TIMEOUT_SEC,
+            "timestamp_tolerance_sec": ai_validation.DEFAULT_TIMESTAMP_TOLERANCE_SEC,
+            "require_timestamp": False,
+            "max_output_tokens": ai_validation.DEFAULT_MAX_OUTPUT_TOKENS,
+        },
         "max_files": None,
         "max_disk_mb": None,
     },
@@ -120,6 +136,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 global_scheduler = None
 WEBCAM_LOCATION = None  # 後ほど LocationInfo オブジェクトで初期化
 logger = logging.getLogger("ytlive_snapshot.capture")
+
+
+class CaptureValidationError(RuntimeError):
+    """The browser returned an image, but it is not a trustworthy live frame."""
 
 
 def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
@@ -240,6 +260,9 @@ def _validate_runtime_config(
     sunset_prefix = schedule_cfg.get("sunset_prefix", "sunset")
     if not isinstance(sunset_prefix, str) or not CAPTURE_NAME_RE.fullmatch(sunset_prefix):
         raise ValueError("sunset_prefix must contain only letters, numbers, underscores, and hyphens")
+    ai_validation.validate_config(
+        config.setdefault("capture", {}).setdefault("ai_validation", {}),
+    )
 
 
 def _configured_fixed_times(schedule_cfg: Dict[str, Any]) -> list:
@@ -390,6 +413,18 @@ def _apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace):
     if getattr(args, "max_disk_mb", None) is not None:
         capture_cfg["max_disk_mb"] = args.max_disk_mb
 
+    ai_cfg = capture_cfg.setdefault("ai_validation", {})
+    if getattr(args, "ai_validation_enabled", None) is not None:
+        ai_cfg["enabled"] = args.ai_validation_enabled
+    if getattr(args, "ai_validation_mode", None):
+        ai_cfg["mode"] = args.ai_validation_mode
+    if getattr(args, "ai_model", None):
+        ai_cfg["model"] = args.ai_model
+    if getattr(args, "ai_timestamp_tolerance_sec", None) is not None:
+        ai_cfg["timestamp_tolerance_sec"] = args.ai_timestamp_tolerance_sec
+    if getattr(args, "ai_require_timestamp", None) is not None:
+        ai_cfg["require_timestamp"] = args.ai_require_timestamp
+
     if getattr(args, "log_file", None):
         logging_cfg["log_file"] = args.log_file
     if getattr(args, "log_level", None):
@@ -422,7 +457,8 @@ def _normalize_youtube_embed_url(embed_url: str, prefer_nocookie: bool = True) -
     - ?si=... はトラブル原因になりやすいので除去
     - watch/live/youtu.be URL は /embed/{video_id} に変換
     - youtube.com/embed -> youtube-nocookie.com/embed に寄せる（任意）
-    - autoplay/mute/playsinline/controls=0 を付与（ミュート自動再生を狙い、UI を抑制）
+    - autoplay/mute/playsinline/controls=1 を付与
+      （LIVE状態の確認後、撮影時だけUIを隠す）
     """
     parsed = urlparse(embed_url)
     scheme = parsed.scheme or "https"
@@ -459,7 +495,10 @@ def _normalize_youtube_embed_url(embed_url: str, prefer_nocookie: bool = True) -
     qs["autoplay"] = "1"             # 自動再生
     qs["mute"] = "1"                 # ミュート（自動再生ブロック回避）
     qs.setdefault("playsinline", "1")
-    qs.setdefault("controls", "0")
+    # YouTube's direct LIVE control is the only trustworthy delayed-playback
+    # signal available to the deterministic checker. Keep controls enabled
+    # while inspecting the player; the screenshot path hides them afterward.
+    qs["controls"] = "1"
     qs.setdefault("modestbranding", "1")
     qs.setdefault("rel", "0")
     qs.setdefault("iv_load_policy", "3")
@@ -609,37 +648,35 @@ def _hide_youtube_player_ui(driver) -> Dict[str, Any]:
 
 def _try_play_youtube_video(driver) -> Dict[str, Any]:
     """YouTube iframe 内の video を JS で再生し、失敗時は既存の play ボタンをクリックする。"""
-    driver.set_script_timeout(8)
-    status = driver.execute_async_script(
+    status = driver.execute_script(
         """
-        const done = arguments[arguments.length - 1];
         const video = document.querySelector('video');
         if (!video) {
-          done({hasVideo: false});
-          return;
+          return {hasVideo: false};
         }
         video.muted = true;
         video.setAttribute('playsinline', '');
-        Promise.resolve(video.play())
-          .then(() => done({
-            hasVideo: true,
-            playRequested: true,
-            paused: video.paused,
-            readyState: video.readyState,
-            currentTime: video.currentTime,
-            videoWidth: video.videoWidth,
-            videoHeight: video.videoHeight
-          }))
-          .catch((error) => done({
-            hasVideo: true,
-            playRequested: false,
-            error: String(error),
-            paused: video.paused,
-            readyState: video.readyState,
-            currentTime: video.currentTime,
-            videoWidth: video.videoWidth,
-            videoHeight: video.videoHeight
-          }));
+        let playRequested = false;
+        let error = null;
+        try {
+          const request = video.play();
+          playRequested = true;
+          if (request && typeof request.catch === 'function') {
+            request.catch(() => null);
+          }
+        } catch (playError) {
+          error = String(playError);
+        }
+        return {
+          hasVideo: true,
+          playRequested,
+          error,
+          paused: video.paused,
+          readyState: video.readyState,
+          currentTime: video.currentTime,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight
+        };
         """
     )
 
@@ -658,14 +695,12 @@ def _try_play_youtube_video(driver) -> Dict[str, Any]:
 def _seek_youtube_live_edge(
     driver,
     max_lag_sec: float,
-    edge_offset_sec: float,
 ) -> Dict[str, Any]:
-    """YouTube live DVR が遅れた位置で始まった場合、保存前にライブ端へ寄せる。"""
+    """Use YouTube's direct LIVE control when it reports delayed playback."""
     driver.set_script_timeout(12)
     return driver.execute_async_script(
         """
         const maxLagSec = Number(arguments[0]);
-        const edgeOffsetSec = Number(arguments[1]);
         const done = arguments[arguments.length - 1];
         const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
         const video = document.querySelector('video');
@@ -714,6 +749,13 @@ def _seek_youtube_live_edge(
               playerVideoData = {error: String(error)};
             }
           }
+          if (
+            isLive === null &&
+            player &&
+            player.classList.contains('ytp-livebadge-color')
+          ) {
+            isLive = true;
+          }
           const ranges = video.seekable;
           const hasRange = Boolean(ranges && ranges.length);
           let rangeStart = null;
@@ -725,6 +767,76 @@ def _seek_youtube_live_edge(
             liveEdge = ranges.end(index);
             lagSec = liveEdge - video.currentTime;
           }
+          const classicLiveControl = document.querySelector('.ytp-live-badge');
+          const classicLiveDisabled = classicLiveControl
+            ? Boolean(
+                classicLiveControl.disabled ||
+                classicLiveControl.matches(':disabled') ||
+                classicLiveControl.getAttribute('aria-disabled') === 'true'
+              )
+            : null;
+          // YouTube's current embedded-player UI renders the LIVE state as a
+          // time display. At the live head it shows only "LIVE"/"ライブ";
+          // while behind it also exposes a negative value such as "-0:20".
+          const modernLiveControl = document.querySelector(
+            '.ytwPlayerTimeDisplayTimeElapsed'
+          );
+          const modernDuration = document.querySelector(
+            '.ytwPlayerTimeDisplayTimeDuration'
+          );
+          const modernLiveText = modernLiveControl
+            ? (modernLiveControl.textContent || '').trim()
+            : '';
+          const modernDurationText = modernDuration
+            ? (modernDuration.textContent || '').trim()
+            : '';
+          const normalizedDurationText = modernDurationText
+            .replace(/[０-９]/g, (digit) => String(digit.charCodeAt(0) - 0xFF10))
+            .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+            .replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06F0))
+            .replace(/[−–—]/g, '-');
+          const modernIsLiveControl = Boolean(
+            modernLiveControl &&
+            (
+              isLive === true ||
+              (player && player.classList.contains('ytp-livebadge-color'))
+            )
+          );
+          const modernLagMatch = normalizedDurationText.match(
+            /-(\\d+):(\\d{2})(?::(\\d{2}))?/
+          );
+          let liveControlLagSec = null;
+          if (modernLagMatch) {
+            if (modernLagMatch[3] === undefined) {
+              liveControlLagSec = (
+                Number(modernLagMatch[1]) * 60 + Number(modernLagMatch[2])
+              );
+            } else {
+              liveControlLagSec = (
+                Number(modernLagMatch[1]) * 3600 +
+                Number(modernLagMatch[2]) * 60 +
+                Number(modernLagMatch[3])
+              );
+            }
+          }
+          const liveControlKind = modernIsLiveControl
+            ? 'modern-time-display'
+            : (classicLiveControl ? 'classic-live-badge' : null);
+          const liveControlWithinTolerance = modernIsLiveControl
+            ? (
+                modernDuration && modernDurationText
+                  ? (
+                      liveControlLagSec === null
+                        ? null
+                        : liveControlLagSec <= maxLagSec
+                    )
+                  : true
+              )
+            : (
+                classicLiveControl
+                  ? classicLiveDisabled
+                  : null
+              );
           return {
             hasVideo: true,
             hasPlayer: Boolean(player),
@@ -736,6 +848,20 @@ def _seek_youtube_live_edge(
             playerState,
             isLive,
             playerVideoData,
+            liveControlPresent: Boolean(liveControlKind),
+            liveControlKind,
+            liveControlText: modernIsLiveControl
+              ? modernLiveText
+              : (
+                  classicLiveControl
+                    ? (classicLiveControl.textContent || '').trim()
+                    : null
+                ),
+            liveControlDurationText: modernIsLiveControl
+              ? modernDurationText
+              : null,
+            liveControlLagSec,
+            liveControlWithinTolerance,
             hasSeekableRange: hasRange,
             rangeStart,
             liveEdge,
@@ -750,104 +876,49 @@ def _seek_youtube_live_edge(
 
         const before = baseStatus();
         let action = null;
-        let targetTime = null;
-        if (before.hasSeekToLiveHead && before.isLive !== false) {
-          action = 'seekToLiveHead';
-        } else if (
-          before.hasPlayerSeekTo &&
-          before.isLive !== false &&
-          Number.isFinite(before.playerDuration) &&
-          before.playerDuration > 0 &&
-          (
-            !Number.isFinite(before.playerLagSec) ||
-            before.playerLagSec > maxLagSec
-          )
-        ) {
-          action = 'player.seekTo';
-          targetTime = Math.max(0, before.playerDuration - Math.max(0, edgeOffsetSec));
-        }
-
-        if (action) {
-          let settled = false;
-          let timeoutId = null;
-          const hasDrawableFrame = () => (
-            video.readyState >= 2 &&
-            video.videoWidth > 0 &&
-            video.videoHeight > 0
-          );
-          const finishPlayerSeek = (reason) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeoutId);
-            video.removeEventListener('seeked', onPlayerSeeked);
-            video.removeEventListener('canplay', onPlayerCanPlay);
-            video.removeEventListener('timeupdate', onPlayerTimeUpdate);
-            const after = baseStatus();
-            done({
-              ...before,
-              seeked: true,
-              action,
-              targetTime,
-              finishReason: reason,
-              afterCurrentTime: after.currentTime,
-              afterLagSec: after.lagSec,
-              afterPlayerCurrentTime: after.playerCurrentTime,
-              afterPlayerDuration: after.playerDuration,
-              afterPlayerLagSec: after.playerLagSec,
-              afterPaused: after.paused,
-              afterReadyState: after.readyState,
-              afterVideoWidth: after.videoWidth,
-              afterVideoHeight: after.videoHeight
-            });
-          };
-          const onPlayerSeeked = () => {
-            if (hasDrawableFrame()) finishPlayerSeek('seeked');
-          };
-          const onPlayerCanPlay = () => {
-            if (hasDrawableFrame()) finishPlayerSeek('canplay');
-          };
-          const onPlayerTimeUpdate = () => {
-            if (hasDrawableFrame()) finishPlayerSeek('timeupdate');
-          };
-          video.addEventListener('seeked', onPlayerSeeked);
-          video.addEventListener('canplay', onPlayerCanPlay);
-          video.addEventListener('timeupdate', onPlayerTimeUpdate);
-          timeoutId = setTimeout(() => finishPlayerSeek('timeout'), 6000);
-          video.muted = true;
-          video.setAttribute('playsinline', '');
-          try {
-            if (action === 'seekToLiveHead') {
-              player.seekToLiveHead();
-            } else {
-              player.seekTo(targetTime, true);
-            }
-            if (typeof player.playVideo === 'function') {
-              player.playVideo();
-            } else {
-              Promise.resolve(video.play()).catch(() => null);
-            }
-          } catch (error) {
-            finishPlayerSeek(String(error));
-          }
-          return;
-        }
-
-        if (!before.hasSeekableRange || !Number.isFinite(before.lagSec)) {
-          done({...before, seeked: false, reason: 'no seekable live range'});
-          return;
-        }
-        if (before.lagSec <= maxLagSec) {
+        // The player's own LIVE display is the primary signal. Avoid seeking
+        // an already-live video based on the ambiguous duration/currentTime
+        // values exposed for DVR streams.
+        if (before.liveControlWithinTolerance === true) {
           video.muted = true;
           video.setAttribute('playsinline', '');
           Promise.resolve(video.play()).catch(() => null);
-          done({...before, seeked: false, reason: 'already near live edge'});
+          done({...before, seeked: false, reason: 'YouTube LIVE display is within tolerance'});
+          return;
+        }
+        if (
+          before.liveControlPresent &&
+          before.liveControlWithinTolerance === false
+        ) {
+          action = before.liveControlKind === 'modern-time-display'
+            ? 'modernLiveControl.click'
+            : 'classicLiveControl.click';
+        }
+
+        if (!action) {
+          video.muted = true;
+          video.setAttribute('playsinline', '');
+          if (player && typeof player.playVideo === 'function') {
+            player.playVideo();
+          } else {
+            Promise.resolve(video.play()).catch(() => null);
+          }
+          // In headless embeds the LIVE control may not be rendered. The raw
+          // duration/currentTime and seekable-end differences can then report
+          // a false delay of roughly the DVR-window length. Preserve the
+          // initially loaded frame instead of turning that ambiguous value
+          // into a destructive seek.
+          done({
+            ...before,
+            seeked: false,
+            timingLagIgnored: true,
+            reason: before.liveControlPresent
+              ? 'LIVE control inconclusive; current playback preserved'
+              : 'LIVE control unavailable; ambiguous timing lag ignored'
+          });
           return;
         }
 
-        targetTime = Math.max(
-          before.rangeStart,
-          before.liveEdge - Math.max(0, edgeOffsetSec)
-        );
         let settled = false;
         let timeoutId = null;
         const hasDrawableFrame = () => (
@@ -855,7 +926,7 @@ def _seek_youtube_live_edge(
           video.videoWidth > 0 &&
           video.videoHeight > 0
         );
-        const finish = (reason) => {
+        const finishLiveControl = (reason) => {
           if (settled) return;
           settled = true;
           clearTimeout(timeoutId);
@@ -866,10 +937,15 @@ def _seek_youtube_live_edge(
           done({
             ...before,
             seeked: true,
-            targetTime,
+            action,
             finishReason: reason,
             afterCurrentTime: after.currentTime,
             afterLagSec: after.lagSec,
+            afterPlayerCurrentTime: after.playerCurrentTime,
+            afterPlayerDuration: after.playerDuration,
+            afterPlayerLagSec: after.playerLagSec,
+            afterLiveControlLagSec: after.liveControlLagSec,
+            afterLiveControlWithinTolerance: after.liveControlWithinTolerance,
             afterPaused: after.paused,
             afterReadyState: after.readyState,
             afterVideoWidth: after.videoWidth,
@@ -877,34 +953,49 @@ def _seek_youtube_live_edge(
           });
         };
         const onSeeked = () => {
-          if (hasDrawableFrame()) finish('seeked');
+          const status = baseStatus();
+          if (
+            hasDrawableFrame() &&
+            status.liveControlWithinTolerance === true
+          ) finishLiveControl('seeked');
         };
         const onCanPlay = () => {
-          if (hasDrawableFrame() && Math.abs(video.currentTime - targetTime) < 5) {
-            finish('canplay');
-          }
+          const status = baseStatus();
+          if (
+            hasDrawableFrame() &&
+            status.liveControlWithinTolerance === true
+          ) finishLiveControl('canplay');
         };
         const onTimeUpdate = () => {
-          if (hasDrawableFrame() && Math.abs(video.currentTime - targetTime) < 5) {
-            finish('timeupdate');
-          }
+          const status = baseStatus();
+          if (
+            hasDrawableFrame() &&
+            status.liveControlWithinTolerance === true
+          ) finishLiveControl('timeupdate');
         };
 
         video.addEventListener('seeked', onSeeked);
         video.addEventListener('canplay', onCanPlay);
         video.addEventListener('timeupdate', onTimeUpdate);
-        timeoutId = setTimeout(() => finish('timeout'), 5000);
+        timeoutId = setTimeout(() => finishLiveControl('timeout'), 6000);
         video.muted = true;
         video.setAttribute('playsinline', '');
         try {
-          video.currentTime = targetTime;
-          Promise.resolve(video.play()).catch(() => null);
+          if (action === 'modernLiveControl.click') {
+            document.querySelector('.ytwPlayerTimeDisplayTimeElapsed').click();
+          } else {
+            document.querySelector('.ytp-live-badge').click();
+          }
+          if (player && typeof player.playVideo === 'function') {
+            player.playVideo();
+          } else {
+            Promise.resolve(video.play()).catch(() => null);
+          }
         } catch (error) {
-          finish(String(error));
+          finishLiveControl(String(error));
         }
         """,
         max_lag_sec,
-        edge_offset_sec,
     )
 
 
@@ -919,25 +1010,156 @@ def _format_optional_seconds(value: Any) -> str:
 
 def _log_live_edge_status(status: Dict[str, Any]):
     if status.get("seeked"):
-        action = status.get("action", "video.currentTime")
-        if action == "seekToLiveHead":
-            logger.info(
-                "Requested YouTube live head: reason=%s before_player_lag=%s after_player_lag=%s",
-                status.get("finishReason"),
-                _format_optional_seconds(status.get("playerLagSec")),
-                _format_optional_seconds(status.get("afterPlayerLagSec")),
-            )
-        else:
-            logger.info(
-                "Seeked YouTube video near live edge: action=%s before_lag=%s after_lag=%s target=%s reason=%s",
-                action,
-                _format_optional_seconds(status.get("lagSec")),
-                _format_optional_seconds(status.get("afterLagSec")),
-                _format_optional_seconds(status.get("targetTime")),
-                status.get("finishReason"),
-            )
+        logger.info(
+            "Requested YouTube live head: action=%s reason=%s displayed_lag=%s within_tolerance=%s before_player_lag=%s after_player_lag=%s",
+            status.get("action"),
+            status.get("finishReason"),
+            _format_optional_seconds(status.get("afterLiveControlLagSec")),
+            status.get("afterLiveControlWithinTolerance"),
+            _format_optional_seconds(status.get("playerLagSec")),
+            _format_optional_seconds(status.get("afterPlayerLagSec")),
+        )
+    elif status.get("timingLagIgnored"):
+        logger.info(
+            "YouTube LIVE control unavailable; kept initial playback without seeking: is_live=%s raw_media_lag=%s raw_player_lag=%s",
+            status.get("isLive"),
+            _format_optional_seconds(status.get("lagSec")),
+            _format_optional_seconds(status.get("playerLagSec")),
+        )
     else:
         logger.debug("YouTube live edge status: %s", status)
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _live_edge_validation_error(
+    status: Dict[str, Any],
+    max_lag_sec: float,
+    require_verification: bool = True,
+) -> Optional[str]:
+    """Return a reason when YouTube is not demonstrably close to the live edge."""
+    if not status.get("hasVideo"):
+        return "YouTube video element is unavailable"
+    if status.get("isLive") is False:
+        return "YouTube player is not reporting live playback"
+
+    # YouTube's own LIVE control is the most direct live-head indicator. The
+    # current UI displays negative lag while behind; older UI enables its LIVE
+    # button when clicking it would catch up.
+    for key in (
+        "afterLiveControlWithinTolerance",
+        "liveControlWithinTolerance",
+    ):
+        within_tolerance = status.get(key)
+        if within_tolerance is True:
+            return None
+        if within_tolerance is False:
+            lag = _finite_float(
+                status.get(
+                    "afterLiveControlLagSec",
+                    status.get("liveControlLagSec"),
+                )
+            )
+            if lag is not None:
+                return (
+                    f"YouTube LIVE control reports {lag:.1f}s delayed playback "
+                    f"(limit {max_lag_sec:.1f}s)"
+                )
+            return "YouTube LIVE control reports delayed playback"
+
+    # With no rendered LIVE control, YouTube's DVR timing values are not a
+    # trustworthy live-edge measurement. Accept a positively identified live
+    # stream without seeking; optional image-clock inspection can add an
+    # independent freshness signal.
+    if status.get("isLive") is True:
+        return None
+
+    if require_verification:
+        return "YouTube live-edge lag could not be verified"
+    return None
+
+
+def _capture_image_validation_error(
+    target_path: Path,
+    min_luminance_stddev: float = 10,
+) -> Optional[str]:
+    """Reject blank, nearly uniform, truncated, or unreadable screenshots."""
+    try:
+        with Image.open(target_path) as image:
+            image.verify()
+        with Image.open(target_path) as image:
+            width, height = image.size
+            if width < 320 or height < 180:
+                return f"capture image is too small ({width}x{height})"
+            sample = image.convert("L")
+            sample.thumbnail((160, 90), Image.Resampling.BILINEAR)
+            stats = ImageStat.Stat(sample)
+            mean = float(stats.mean[0])
+            stddev = float(stats.stddev[0])
+    except (OSError, UnidentifiedImageError) as exc:
+        return f"capture image is unreadable: {exc}"
+
+    if mean <= 1:
+        return f"capture image is effectively black (mean={mean:.1f})"
+    if stddev < min_luminance_stddev:
+        return (
+            "capture image is nearly uniform and likely an error/loading frame "
+            f"(mean={mean:.1f}, stddev={stddev:.1f})"
+        )
+    return None
+
+
+def _apply_optional_ai_validation(
+    image_path: Path,
+    *,
+    captured_at: datetime.datetime,
+    config: Mapping[str, Any],
+    inspector=None,
+) -> None:
+    """Run optional OpenAI image inspection and enforce it only when requested."""
+    if not config.get("enabled", False):
+        return
+
+    mode = config.get("mode", ai_validation.DEFAULT_MODE)
+    inspect = ai_validation.inspect_capture if inspector is None else inspector
+    try:
+        result = inspect(
+            image_path,
+            captured_at=captured_at,
+            config=config,
+        )
+    except ai_validation.AIValidationError as exc:
+        if mode == "enforce":
+            raise CaptureValidationError(
+                f"AI validation could not complete: {exc}"
+            ) from exc
+        logger.warning("AI validation unavailable; keeping local result: %s", exc)
+        return
+
+    logger.info(
+        "AI capture validation: decision=%s confidence=%.2f "
+        "timestamp_status=%s observed_timestamp=%s delta=%s summary=%s",
+        result.decision,
+        result.confidence,
+        result.timestamp_status,
+        result.observed_timestamp or "n/a",
+        _format_optional_seconds(result.timestamp_delta_seconds),
+        result.summary,
+    )
+    rejection = result.rejection_reason(
+        require_timestamp=config.get("require_timestamp", False),
+    )
+    if not rejection:
+        return
+    if mode == "enforce":
+        raise CaptureValidationError(rejection)
+    logger.warning("AI validation advisory: %s", rejection)
 
 
 def _video_frame_status(driver) -> Dict[str, Any]:
@@ -1093,14 +1315,19 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
         "live_edge_max_lag_sec",
         capture_cfg.get("live_edge_max_lag_sec", 30),
     )
-    live_edge_offset = _validate_non_negative_float(
-        "live_edge_offset_sec",
-        capture_cfg.get("live_edge_offset_sec", 2),
+    live_edge_require_verification = (
+        capture_cfg.get("live_edge_require_verification", True) is not False
+    )
+    frame_validation = capture_cfg.get("frame_validation", True) is not False
+    frame_min_luminance_stddev = _validate_non_negative_float(
+        "frame_min_luminance_stddev",
+        capture_cfg.get("frame_min_luminance_stddev", 10),
     )
 
     for attempt in range(1, max_retries + 1):
         driver = None
         wrapper_httpd = None
+        attempt_path = None
         try:
             options = Options()
             if chrome_cfg.get("headless", True):
@@ -1146,23 +1373,17 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                 except TimeoutException:
                     logger.warning("Timed out waiting for YouTube video element")
 
-                ui_status = _hide_youtube_player_ui(driver)
-                logger.debug("YouTube UI status before play: %s", ui_status)
                 play_status = _try_play_youtube_video(driver)
                 logger.debug("YouTube play status: %s", play_status)
-                if live_edge_seek:
-                    live_status = _seek_youtube_live_edge(
-                        driver,
-                        live_edge_max_lag,
-                        live_edge_offset,
-                    )
-                    _log_live_edge_status(live_status)
-
+                # Let the embedded-player controls settle before using the
+                # direct LIVE state. The control is inspected exactly once,
+                # immediately before the screenshot, so at most one catch-up
+                # action can occur during a capture attempt.
                 time.sleep(3)
-                ui_status = _hide_youtube_player_ui(driver)
-                logger.debug("YouTube UI status before screenshot: %s", ui_status)
                 if "Error 153" in driver.page_source:
-                    logger.warning("YouTube player shows Error 153 (referer issue suspected)")
+                    raise CaptureValidationError(
+                        "YouTube player shows Error 153 (referer issue suspected)"
+                    )
             finally:
                 driver.switch_to.default_content()
 
@@ -1172,6 +1393,7 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
             else:
                 filename = f"{file_prefix}{now.strftime('%Y%m%d_%H%M')}.png"
             target_path = output_dir / filename
+            attempt_path = output_dir / f".{target_path.stem}.attempt-{os.getpid()}-{attempt}{target_path.suffix}"
 
             try:
                 iframe_element = WebDriverWait(driver, 5).until(
@@ -1179,30 +1401,35 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                 )
                 driver.switch_to.frame(iframe_element)
                 try:
-                    _hide_youtube_player_ui(driver)
                     if live_edge_seek:
                         live_status = _seek_youtube_live_edge(
                             driver,
                             live_edge_max_lag,
-                            live_edge_offset,
                         )
                         _log_live_edge_status(live_status)
+                        live_edge_error = _live_edge_validation_error(
+                            live_status,
+                            live_edge_max_lag,
+                            require_verification=live_edge_require_verification,
+                        )
+                        if live_edge_error:
+                            raise CaptureValidationError(live_edge_error)
+                    _hide_youtube_player_ui(driver)
                     frame_status = _wait_for_youtube_video_frame(driver)
                     if frame_status.get("ready"):
                         logger.debug("YouTube video frame ready before canvas: %s", frame_status)
                     else:
-                        logger.warning(
-                            "YouTube video frame still not ready before canvas: %s",
-                            frame_status,
+                        raise CaptureValidationError(
+                            f"YouTube video frame is not ready: {frame_status}"
                         )
-                    if not _save_video_canvas_screenshot(driver, target_path):
+                    if not _save_video_canvas_screenshot(driver, attempt_path):
                         video_element = driver.find_element(By.CSS_SELECTOR, "video.html5-main-video, video")
                         video_size = video_element.size
                         video_width = video_size.get("width", 0)
                         video_height = video_size.get("height", 0)
                         if video_width and video_height:
-                            video_element.screenshot(str(target_path))
-                            logger.info("Saved video element screenshot to %s", target_path)
+                            video_element.screenshot(str(attempt_path))
+                            logger.info("Saved video element screenshot to %s", attempt_path)
                         else:
                             raise WebDriverException("video element size returned zero")
                 except (NoSuchElementException, WebDriverException) as exc:
@@ -1214,16 +1441,36 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                     if not iframe_width or not iframe_height:
                         raise WebDriverException("iframe size returned zero")
                     try:
-                        iframe_element.screenshot(str(target_path))
-                        logger.info("Saved iframe screenshot to %s", target_path)
+                        iframe_element.screenshot(str(attempt_path))
+                        logger.info("Saved iframe screenshot to %s", attempt_path)
                     except WebDriverException as exc:
                         logger.warning("iframe screenshot failed (%s), falling back to full screen", exc)
-                        driver.save_screenshot(str(target_path))
+                        driver.save_screenshot(str(attempt_path))
                 finally:
                     driver.switch_to.default_content()
             except NoSuchElementException:
-                logger.warning("iframe not found; saving full screen snapshot")
-                driver.save_screenshot(str(target_path))
+                raise CaptureValidationError("YouTube iframe is unavailable")
+
+            if frame_validation:
+                frame_error = _capture_image_validation_error(
+                    attempt_path,
+                    frame_min_luminance_stddev,
+                )
+                if frame_error:
+                    raise CaptureValidationError(frame_error)
+
+            _apply_optional_ai_validation(
+                attempt_path,
+                captured_at=datetime.datetime.now(tzinfo),
+                config=capture_cfg.get("ai_validation", {}),
+            )
+
+            if target_path.exists():
+                logger.warning("Capture already exists; preserving original: %s", target_path)
+                attempt_path.unlink(missing_ok=True)
+            else:
+                os.replace(attempt_path, target_path)
+                logger.info("Published validated capture to %s", target_path)
 
             _prune_old_files(output_dir, file_prefix, max_files, max_disk_mb)
             return True
@@ -1232,6 +1479,11 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
             if attempt < max_retries:
                 time.sleep(retry_delay)
         finally:
+            if attempt_path is not None:
+                try:
+                    attempt_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove temporary capture: %s", attempt_path)
             try:
                 if driver:
                     driver.quit()
@@ -1419,6 +1671,46 @@ def main(argv=None, *, prog=None):
     parser.add_argument("--retry-delay-sec", type=int, help="リトライ間隔（秒）")
     parser.add_argument("--max-files", type=int, help="prefix ごとの最大保存枚数")
     parser.add_argument("--max-disk-mb", type=float, help="出力ディレクトリのサイズ上限（MB）")
+    ai_group = parser.add_mutually_exclusive_group()
+    ai_group.add_argument(
+        "--ai-validate",
+        dest="ai_validation_enabled",
+        action="store_true",
+        help="OpenAIによる任意の画像検査を有効化",
+    )
+    ai_group.add_argument(
+        "--no-ai-validate",
+        dest="ai_validation_enabled",
+        action="store_false",
+        help="設定ファイルのAI画像検査を無効化",
+    )
+    parser.add_argument(
+        "--ai-validation-mode",
+        choices=sorted(ai_validation.VALID_MODES),
+        help="AI判定をログだけにするか、保存条件として強制するか",
+    )
+    parser.add_argument(
+        "--ai-model",
+        help=f"AI画像検査モデル (既定: {ai_validation.DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--ai-timestamp-tolerance-sec",
+        type=float,
+        help="画像内時刻と撮影時刻の許容差（秒）",
+    )
+    timestamp_group = parser.add_mutually_exclusive_group()
+    timestamp_group.add_argument(
+        "--ai-require-timestamp",
+        dest="ai_require_timestamp",
+        action="store_true",
+        help="AI強制モードで読み取り可能な現在時刻を必須にする",
+    )
+    timestamp_group.add_argument(
+        "--ai-allow-missing-timestamp",
+        dest="ai_require_timestamp",
+        action="store_false",
+        help="時刻表示のない正常画像をAI検査で許可する",
+    )
     parser.add_argument("--log-file", type=str, help="ログを保存するファイルパス")
     parser.add_argument("--log-level", type=str, choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="ログレベル")
@@ -1433,7 +1725,12 @@ def main(argv=None, *, prog=None):
                         help="正午キャプチャを無効化")
     parser.add_argument("--no-sunset", dest="enable_sunset", action="store_false",
                         help="サンセットキャプチャを無効化")
-    parser.set_defaults(enable_noon=None, enable_sunset=None)
+    parser.set_defaults(
+        enable_noon=None,
+        enable_sunset=None,
+        ai_validation_enabled=None,
+        ai_require_timestamp=None,
+    )
     args = parser.parse_args(argv)
 
     if args.test and args.once:

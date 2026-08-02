@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "youtube-live-snapshot"
-version = "3.1.0"
+version = "3.2.0"
 description = "Schedule still-image captures from YouTube Live and render visual archive outputs."
 readme = "README.md"
 license = "MIT"
@@ -19,12 +19,18 @@ dependencies = [
   "jpholiday>=0.1.8",
   "PyYAML>=6.0",
 ]
+
 keywords = ["youtube-live", "snapshot", "raspberry-pi", "render", "calendar"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
+]
+
+[project.optional-dependencies]
+ai = [
+  "openai>=2.0.0,<3",
 ]
 
 [project.scripts]

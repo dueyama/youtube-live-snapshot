@@ -15,6 +15,7 @@ class YouTubeUrlNormalizationTest(unittest.TestCase):
         self.assertEqual(parsed.path, "/embed/VIDEO_ID")
         self.assertEqual(query["autoplay"], ["1"])
         self.assertEqual(query["mute"], ["1"])
+        self.assertEqual(query["controls"], ["1"])
         self.assertEqual(query["enablejsapi"], ["1"])
         self.assertNotIn("si", query)
         self.assertNotIn("v", query)

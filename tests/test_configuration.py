@@ -2,6 +2,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from ytlive_snapshot import capture
 
@@ -11,6 +12,9 @@ class ConfigurationTest(unittest.TestCase):
         self.assertIsNone(capture.DEFAULT_CONFIG["embed_url"])
         self.assertIsNone(capture.DEFAULT_CONFIG["schedule"]["latitude"])
         self.assertIsNone(capture.DEFAULT_CONFIG["schedule"]["longitude"])
+        self.assertFalse(
+            capture.DEFAULT_CONFIG["capture"]["ai_validation"]["enabled"]
+        )
 
     def test_environment_overrides_private_values(self):
         config = copy.deepcopy(capture.DEFAULT_CONFIG)
@@ -70,6 +74,25 @@ class ConfigurationTest(unittest.TestCase):
             )
 
         self.assertEqual(resolved, str(config_path))
+
+    def test_cli_can_enable_ai_validation_without_changing_default(self):
+        config = copy.deepcopy(capture.DEFAULT_CONFIG)
+        args = SimpleNamespace(
+            ai_validation_enabled=True,
+            ai_validation_mode="advisory",
+            ai_model="gpt-5.6-luna",
+            ai_timestamp_tolerance_sec=180,
+            ai_require_timestamp=True,
+        )
+
+        capture._apply_cli_overrides(config, args)
+
+        ai_config = config["capture"]["ai_validation"]
+        self.assertTrue(ai_config["enabled"])
+        self.assertEqual(ai_config["mode"], "advisory")
+        self.assertEqual(ai_config["model"], "gpt-5.6-luna")
+        self.assertEqual(ai_config["timestamp_tolerance_sec"], 180)
+        self.assertTrue(ai_config["require_timestamp"])
 
 
 if __name__ == "__main__":

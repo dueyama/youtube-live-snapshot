@@ -24,6 +24,7 @@ This is not an official YouTube or Google project.
 - YAML, environment-variable, and CLI configuration
 - Retries, logging, and optional retention limits
 - Automatic normalization of YouTube watch, share, live, and embed URLs
+- Optional OpenAI vision inspection of frame quality and visible timestamps
 
 ### Archive rendering
 
@@ -64,6 +65,12 @@ python -m pip install --upgrade pip
 python -m pip install .
 
 ytlive-snapshot --help
+```
+
+The optional OpenAI image inspector is installed separately:
+
+```bash
+python -m pip install '.[ai]'
 ```
 
 ## Choosing the YouTube Live URL
@@ -189,6 +196,89 @@ ytlive-snapshot capture \
 ```
 
 For continuous operation, run the foreground command from systemd or another service manager. Keep the service definition, boot ordering, credentials, and host lifecycle in the host-management layer. See [RUNBOOK.md](RUNBOOK.md).
+
+Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only a validated image is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
+
+Current YouTube/Chromium behavior has an important ambiguity: in some headless embeds, `video.seekable.end(0) - video.currentTime` is reported as exactly `3600` seconds even when the visible camera clock is only tens of seconds behind wall-clock time. That value is a distance on the player's internal DVR timeline, not proof that the displayed video is one hour late. The tool therefore logs it only as diagnostic `raw_media_lag` and never seeks from that value alone. A seek is attempted only when YouTube's own LIVE control explicitly reports delayed playback. If the stream includes a visible clock, its real-world freshness can additionally be checked by a person or by the optional AI inspection.
+
+## Optional AI image inspection
+
+AI inspection is **off by default**. A normal installation makes no OpenAI API
+requests, does not require an API key, and continues to use only the local
+deterministic checks described above.
+
+The purpose of this option is to add a semantic second opinion for unattended,
+long-running capture systems. Local checks are the authoritative first layer:
+they can read the YouTube player state, measure the displayed delay, verify the
+image file, and reject obviously blank or nearly uniform frames. They cannot
+reliably understand every unusual screen that still looks like a valid image,
+or read and interpret a small camera clock in different layouts. AI inspection
+is intended to help identify those visually plausible but undesirable captures
+and to compare a visible camera timestamp with the scheduled capture time.
+
+It remains optional because enabling it sends an image outside the machine,
+requires network access and an API key, incurs usage cost, and can produce OCR
+or judgment errors. The capture service must therefore remain useful and
+predictable without AI. AI does not replace the mechanical LIVE-state check;
+at most, a visible camera timestamp provides independent supporting evidence.
+
+When explicitly enabled, the captured image is sent to the OpenAI Responses
+API before its temporary file is published. The inspector can identify a
+blank or obstructed video frame, read a visible camera clock, and compare that
+clock with the expected capture time. It uses `gpt-5.6-luna` by default because
+that model accepts image input and is intended for cost-sensitive workloads;
+the model remains configurable. Image detail defaults to `original` because
+small timestamp text is an OCR-like task.
+
+The AI prompt accepts overlays in any language and locale. It should not reject
+a frame merely because of its language, and ambiguous date ordering or unclear
+digits are reported as unreadable rather than guessed.
+
+Install the optional dependency, expose the key only through the environment,
+and opt in through the private YAML file:
+
+```bash
+python -m pip install '.[ai]'
+export OPENAI_API_KEY='...'
+```
+
+```yaml
+capture:
+  ai_validation:
+    enabled: true
+    model: gpt-5.6-luna
+    mode: advisory
+    detail: original
+    api_key_env: OPENAI_API_KEY
+    timestamp_tolerance_sec: 120
+    require_timestamp: false
+```
+
+Start with `mode: advisory`: the structured result is logged, but an API
+failure or negative verdict does not discard the locally valid image. After
+reviewing representative results, `mode: enforce` makes an AI failure,
+uncertain verdict, stale visible timestamp, or required-but-missing timestamp
+reject that attempt and enter the normal retry path. Streams without a visible
+camera clock should leave `require_timestamp: false`.
+
+The same settings can be overridden for one run:
+
+```bash
+ytlive-snapshot capture \
+  --config config/capture.yaml \
+  --once \
+  --ai-validate \
+  --ai-validation-mode advisory \
+  --ai-model gpt-5.6-luna
+```
+
+Enabling this feature sends the captured image to OpenAI and incurs API usage.
+Requests use `store: false`, but users should still review the stream's privacy
+and authorization requirements. AI inspection complements rather than replaces
+the local checks and cannot by itself prove that a stream is live when the
+image contains no reliable time reference. See the official OpenAI
+[vision input guide](https://developers.openai.com/api/docs/guides/images-vision)
+and [`gpt-5.6-luna` model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
 
 ## Capture schedules
 
@@ -331,6 +421,7 @@ AIエージェントがなくても単独で動作します。Codexなどと組�
 - 当年写真を当年へ配置する通常版
 - 前年写真を今年の曜日配置へ載せる年シフト版
 - PNG、JPEG、PDF、平均色表示
+- 既定では無効なOpenAI画像品質・時刻検査
 
 ### 対応環境とAIによる導入支援
 
@@ -389,6 +480,12 @@ python -m pip install --upgrade pip
 python -m pip install .
 ```
 
+任意のAI画像検査も使用する場合だけ、追加依存を導入します。
+
+```bash
+python -m pip install '.[ai]'
+```
+
 ### キャプチャ設定
 
 ```bash
@@ -436,6 +533,43 @@ ytlive-snapshot capture \
 ```
 
 常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義、起動停止、秘密設定、OS管理はホスト管理側で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
+
+保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、検査に合格した画像だけを一時ファイルから永続ファイル名へ移します。これらは既定で有効です。
+
+現在のYouTube／Chromiumには注意すべき曖昧さがあります。一部のheadless埋め込みでは、`video.seekable.end(0) - video.currentTime`が正確に`3600`秒を返しても、画面内のカメラ時計は実時刻から数十秒しか遅れていないことがあります。この値はプレイヤー内部のDVR時間軸上の距離であり、映像が現実に1時間遅れている証拠ではありません。そのため、本ツールはこれを診断用の`raw_media_lag`としてログに残すだけで、この値単独ではシークしません。YouTube自身のLIVE操作が遅れ再生を明示した場合だけシークを試みます。画面内に時計がある配信では、人による確認または任意のAI画像検査で実時刻との鮮度を追加確認できます。
+
+### 任意のAI画像検査
+
+AI画像検査は**既定では無効**です。通常のインストールではOpenAI APIを呼び出さず、APIキーも不要で、従来のローカル検査だけを行います。
+
+このオプションの目的は、長期間無人運転する撮影システムに、画像内容を理解する補助的な確認を追加することです。第一判定は常にローカルの機械検査です。YouTubeプレイヤー状態、画面に表示された遅延、画像ファイルの正常性、黒画面やほぼ一様な画像は機械的に確認できます。一方、画像ファイルとしては正常に見える特殊なエラー画面や想定外の表示、小さなカメラ時計の多様な配置までは、固定ルールだけでは完全に扱えません。AI検査は、このような「画像としては成立しているが保存したくない可能性があるフレーム」を補助的に見つけ、画像内のカメラ時刻と予定撮影時刻を比較するためのものです。
+
+任意機能としているのは、有効にすると画像を外部へ送信し、ネットワーク、APIキー、利用料が必要になり、OCRや判断を誤る可能性もあるためです。撮影サービス本体はAIなしでも実用的かつ予測可能に動作しなければなりません。AIは機械的なLIVE状態判定を置き換えず、画像内に信頼できる時計がある場合に独立した補足情報を与えるだけです。
+
+明示的に有効にすると、一時画像を永続ファイル名へ移す前にOpenAI Responses APIへ送り、黒画面やエラー画面、再生コントロールの映り込み、画像内のカメラ時刻を確認できます。既定モデルは、画像入力に対応する低コスト向けの`gpt-5.6-luna`です。小さな時刻表示を読むため、画像詳細は`original`を既定にしています。
+
+画像内の文字や日付形式は任意の言語・地域を許容します。言語が異なること自体を不合格理由にせず、日月順や数字を確定できない場合は推測せず`unreadable`として扱います。
+
+```bash
+python -m pip install '.[ai]'
+export OPENAI_API_KEY='...'
+```
+
+```yaml
+capture:
+  ai_validation:
+    enabled: true
+    model: gpt-5.6-luna
+    mode: advisory
+    detail: original
+    api_key_env: OPENAI_API_KEY
+    timestamp_tolerance_sec: 120
+    require_timestamp: false
+```
+
+最初は`mode: advisory`を推奨します。判定結果はログへ出しますが、API障害やAIの不合格判定だけで画像を捨てません。実画像で結果を確認した後、`mode: enforce`にすると、不合格・判断不能・古い画像内時刻・必須時刻を読めない場合を通常の再試行へ回せます。時刻表示のない配信では`require_timestamp: false`のまま使用します。
+
+この機能を有効にした場合だけ、撮影画像がOpenAIへ送信され、API利用料が発生します。リクエストは`store: false`ですが、配信の公開範囲と利用許可は利用者が確認してください。AI検査はローカル検査を補完するもので、信頼できる時刻表示がない画像だけから「現在ライブ中」と完全に証明するものではありません。公式の[画像入力ガイド](https://developers.openai.com/api/docs/guides/images-vision)と[`gpt-5.6-luna`モデル情報](https://developers.openai.com/api/docs/models/gpt-5.6-luna)も参照してください。
 
 ### 撮影時刻
 

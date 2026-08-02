@@ -1,4 +1,4 @@
-# YouTube Live Snapshot v3.1 sample configuration
+# YouTube Live Snapshot v3.2 sample configuration
 embed_url: null  # required: YouTube watch/live/embed URL
 chrome:
   driver_path: /usr/bin/chromedriver
@@ -11,7 +11,19 @@ capture:
   retry_delay_sec: 10
   live_edge_seek: true
   live_edge_max_lag_sec: 30
-  live_edge_offset_sec: 2
+  live_edge_require_verification: true  # retry unless the player proves it is close to live
+  frame_validation: true                # reject blank/error/loading screenshots
+  frame_min_luminance_stddev: 10
+  ai_validation:
+    enabled: false                      # opt in; no API request is made by default
+    model: gpt-5.6-luna
+    mode: advisory                      # advisory logs; enforce can reject a capture
+    detail: original                    # recommended when reading a small timestamp
+    api_key_env: OPENAI_API_KEY         # key value stays in the environment
+    timeout_sec: 45
+    timestamp_tolerance_sec: 120
+    require_timestamp: false            # enable for streams with a visible camera clock
+    max_output_tokens: 400
   max_files: null         # set an integer only when old captures may be deleted
   max_disk_mb: null       # set an integer only when old captures may be deleted
 schedule:
