@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-YouTube Live Snapshot renderer v3.1.0
-主な変更点:
- - YAML 設定 (`--config`, `--categories-config`) でカテゴリや入出力を外部化し、複数レイアウトを管理
- - 月次カレンダーを一時 PNG に退避しつつ縦連結することで Raspberry Pi でもメモリを抑制
- - 欠損日をプレースホルダー表示し、`--min-coverage` しきい値を満たさない場合は終了コード 2 で検知
- - `--month/--months`, `--prefix`, `--category-id`, `--dry-run` など CLI フィルタリングを拡充
- - logging + exit code 整備で cron/systemd から監視しやすくし、PDF 生成は ReportLab の有無に応じて安全にスキップ
-
-使い方:
-  ytlive-snapshot render --config config/render.yaml
-"""
+"""Render saved YouTube Live snapshots as monthly and annual archives."""
 import argparse
 import calendar
 import glob
@@ -397,8 +386,8 @@ def crop_image(img, gravity, crop_width, crop_height, offset):
     return img.crop((x, y, x + crop_width, y + crop_height))
 
 def process_image_file_custom(filepath, gravity, crop_offset, cell_w, cell_h, mode="thumbnail"):
-    # Keep the legacy crop behavior: use the fixed base cell size when calculating
-    # vertical gravity and offsets, independently of the final output scale.
+    # Use the fixed base cell size for crop gravity and offsets, independently
+    # of the final output scale.
     crop_width = BASE_CELL_WIDTH
     crop_height = BASE_CELL_HEIGHT
 

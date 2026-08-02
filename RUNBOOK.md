@@ -1,21 +1,134 @@
 # YouTube Live Snapshot Deployment Guide
 
-この文書は、YouTube Live Snapshotを常時稼働ホストへ配備するための汎用ガイドです。特定のホスト名、ユーザー名、絶対パス、サービス管理ツールには依存しません。
+This guide shows one way to run YouTube Live Snapshot continuously on Raspberry Pi OS or another Linux system. Adjust the example paths and service-manager settings for your environment.
 
-## 推奨ディレクトリ分離
+[日本語はこちら](#日本語)
 
-コード、設定、永続データ、ログを分離してください。
+## Separate application and data directories
+
+Keep the application, configuration, snapshots, and logs in separate locations so that application upgrades do not replace the archive.
 
 ```text
-/opt/ytlive-snapshot/app/          # コードと仮想環境
+/opt/ytlive-snapshot/app/          # application and virtual environment
+/etc/ytlive-snapshot/              # capture.yaml
+/var/lib/ytlive-snapshot/captures/ # persistent snapshots
+/var/log/ytlive-snapshot/          # optional file logs
+```
+
+These paths are examples. For a non-root installation, choose locations that the service account can read or write as appropriate.
+
+## Install and verify
+
+```bash
+cd /opt/ytlive-snapshot/app
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/python -m py_compile ytlive_snapshot/*.py
+.venv/bin/ytlive-snapshot --help
+.venv/bin/ytlive-snapshot --version
+.venv/bin/python -m pip check
+```
+
+Also verify that:
+
+- a Chromium-compatible browser starts successfully;
+- ChromeDriver is compatible with the browser;
+- the service account can read the configuration;
+- the snapshot directory is writable;
+- the bundled font is available; and
+- scheduled times and sunset calculations use the intended time zone.
+
+## Configure capture
+
+Copy the sample and edit it for the stream and schedule you want to capture.
+
+```bash
+install -d /etc/ytlive-snapshot
+cp config/capture.sample.yaml /etc/ytlive-snapshot/capture.yaml
+```
+
+Set `embed_url`. If sunset scheduling is enabled, also set `latitude` and `longitude` for the capture location.
+
+## Test one capture
+
+Use a temporary output directory for the first test:
+
+```bash
+YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml \
+  .venv/bin/ytlive-snapshot capture \
+  --once \
+  --output-dir /var/lib/ytlive-snapshot/captures_test
+```
+
+Confirm that the command creates a readable PNG showing the expected current frame. The exit code alone is not sufficient. The log entry `YouTube source resolution check` should report `result=preferred` or `result=minimum`, and `observed` should meet the configured minimum resolution. A frame below that minimum is not moved to the normal output filename.
+
+## Run with a service manager
+
+Run `ytlive-snapshot capture` in the foreground from systemd or another service manager. The essential systemd settings are:
+
+```ini
+WorkingDirectory=/opt/ytlive-snapshot/app
+Environment=YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml
+ExecStart=/opt/ytlive-snapshot/app/.venv/bin/ytlive-snapshot capture --output-dir /var/lib/ytlive-snapshot/captures
+```
+
+Recommended service behavior:
+
+- restart only after an unexpected exit;
+- use `SIGINT` for graceful shutdown;
+- start after networking and time synchronization are available; and
+- retain stdout and stderr in journald or another log system.
+
+After enabling the service, verify the process, recent logs, the next scheduled run, and an actual newly created image.
+
+## Upgrade
+
+1. Record the current application version and configuration location.
+2. Install the new application in a separate directory or virtual environment.
+3. Run syntax checks, unit tests, and `pip check`.
+4. Perform a single capture into a temporary output directory.
+5. Switch the service to the new application directory.
+6. Restart it through the service manager.
+7. Verify the process, logs, schedule, and a newly created image.
+
+Keep the previous application directory until the new installation has produced a valid capture. Snapshot data should remain in its persistent directory throughout the upgrade.
+
+## Render an archive
+
+Read the persistent snapshots and write render output to a separate directory:
+
+```bash
+.venv/bin/ytlive-snapshot render \
+  --config config/render.sample.yaml \
+  --input-dir /var/lib/ytlive-snapshot/captures \
+  --output-dir /var/lib/ytlive-snapshot/out \
+  --year 2026
+```
+
+Set `--source-year` to the same value as `--year` for a same-year archive. Set it to the previous year to place last year's photographs on this year's calendar layout.
+
+Snapshots are removed only when `max_files` or `max_disk_mb` is configured. Each limit applies to normal PNG files in the series currently being saved. Check the resulting retention behavior and keep backups before enabling either limit for an existing archive.
+
+---
+
+## 日本語
+
+このガイドでは、Raspberry Pi OSまたは一般的なLinuxでYouTube Live Snapshotを常時稼働させる一例を示します。パスとサービス管理の設定は利用環境に合わせて変更してください。
+
+### アプリとデータの分離
+
+更新時にも画像を残せるように、アプリ、設定、キャプチャ、ログを別の場所へ置きます。
+
+```text
+/opt/ytlive-snapshot/app/          # アプリと仮想環境
 /etc/ytlive-snapshot/              # capture.yaml
 /var/lib/ytlive-snapshot/captures/ # 永続画像
 /var/log/ytlive-snapshot/          # ファイルログを使う場合
 ```
 
-パスは一例です。一般ユーザーで動かす場合は、そのユーザーが読み書きできる場所へ置き換えてください。
+これらは例です。一般ユーザーで動かす場合は、サービス実行ユーザーが必要な読み書きを行える場所へ置き換えてください。
 
-## 配備前チェック
+### インストールと確認
 
 ```bash
 cd /opt/ytlive-snapshot/app
@@ -31,25 +144,25 @@ python3 -m venv .venv
 
 - Chromium互換ブラウザが起動できる
 - ChromeDriverとブラウザのバージョンが適合している
-- 設定ファイルをサービスユーザーが読める
+- サービス実行ユーザーが設定ファイルを読める
 - キャプチャ保存先へ書き込める
 - 同梱フォントを読み込める
-- 固定時刻と日の入りオフセットが意図したタイムゾーンで登録される
+- 固定時刻と日の入り計算が意図したタイムゾーンになる
 
-## ホスト固有設定
+### 撮影設定
 
-公開サンプルから実設定を作ります。
+サンプルをコピーし、対象の配信と撮影予定に合わせて編集します。
 
 ```bash
 install -d /etc/ytlive-snapshot
 cp config/capture.sample.yaml /etc/ytlive-snapshot/capture.yaml
 ```
 
-`embed_url`を設定し、日の入り撮影を使う場合は`latitude`と`longitude`も設定します。実設定はコード配備物や公開Gitリポジトリへ含めないでください。
+`embed_url`を設定します。日の入り撮影を有効にする場合は、撮影地点の`latitude`と`longitude`も設定します。
 
-## 安全な単発テスト
+### 単発撮影の確認
 
-本番アーカイブとは別のディレクトリへ出力します。
+最初は確認用の出力先を使用します。
 
 ```bash
 YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml \
@@ -58,46 +171,42 @@ YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml \
   --output-dir /var/lib/ytlive-snapshot/captures_test
 ```
 
-生成されたPNGを確認してから定期実行へ進んでください。終了コードだけでなく、
-ログの`YouTube source resolution check`が`result=preferred`または
-`result=minimum`であり、`observed`が最低`640x360`以上であることも確認します。
-保存PNGの寸法は元動画の解像度ではありません。最低値未満のフレームは一時
-ファイルのまま破棄され、永続ファイル名には公開されません。
+読み取り可能なPNGが生成され、期待する現在映像になっていることを確認します。終了コードだけでは十分ではありません。ログの`YouTube source resolution check`が`result=preferred`または`result=minimum`で、`observed`が設定した最低解像度以上であることも確認します。最低値未満の画像は通常の保存ファイル名へ移動されません。
 
-## サービスマネージャーとの統合
+### サービスとして実行
 
-systemdなどのサービスマネージャーからは、`ytlive-snapshot capture`をフォアグラウンドで直接実行します。
+systemdなどから`ytlive-snapshot capture`をフォアグラウンド実行します。systemdで必要になる主な設定は次のとおりです。
 
-```text
+```ini
 WorkingDirectory=/opt/ytlive-snapshot/app
 Environment=YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml
 ExecStart=/opt/ytlive-snapshot/app/.venv/bin/ytlive-snapshot capture --output-dir /var/lib/ytlive-snapshot/captures
 ```
 
-推奨事項:
+推奨設定:
 
 - 異常終了時だけ再起動する
-- 停止シグナルにはSIGINTを使う
+- 正常終了には`SIGINT`を使う
 - ネットワークと時刻同期の後に起動する
-- stdout/stderrをjournaldなどへ保存する
-- サービス定義はホスト管理側で所有する
+- stdoutとstderrをjournaldなどへ保存する
 
-## 更新手順
+有効化後は、プロセス、直近ログ、次回の撮影予定、実際に生成された新しい画像を確認します。
 
-1. 現在のコードと設定をバックアップする
-2. 新しいコードを一時ディレクトリへ展開する
-3. 仮想環境と依存関係を更新する
-4. 構文チェックと単体テストを実行する
-5. 本番アーカイブとは別の場所で単発キャプチャを確認する
-6. コード配備先を切り替える
-7. サービスマネージャーから再起動する
-8. プロセス、ログ、新しい画像の生成を確認する
+### 更新
 
-終了コードやPIDだけでなく、実際に期待した時刻の画像が生成されていることを確認してください。
+1. 現在のバージョンと設定ファイルの場所を記録する
+2. 新版を別のディレクトリまたは仮想環境へインストールする
+3. 構文チェック、単体テスト、`pip check`を行う
+4. 確認用の出力先へ単発撮影する
+5. サービスが使うアプリディレクトリを切り替える
+6. サービス管理ツールから再起動する
+7. プロセス、ログ、撮影予定、新しい画像を確認する
 
-## アーカイブ描画
+新版で有効な画像を取得できるまでは旧版を残します。更新中もキャプチャ画像は永続保存先に置いたままにします。
 
-永続画像を読み取り、出力だけを別ディレクトリへ書きます。
+### アーカイブ描画
+
+永続画像を読み取り、描画結果を別の場所へ保存します。
 
 ```bash
 .venv/bin/ytlive-snapshot render \
@@ -107,6 +216,6 @@ ExecStart=/opt/ytlive-snapshot/app/.venv/bin/ytlive-snapshot capture --output-di
   --year 2026
 ```
 
-当年の写真を当年の日付へ配置する場合は`--source-year`を`--year`と同じ値にします。前年の写真を今年の曜日配置へ載せる場合は、`--source-year`を1年前にします。
+当年の写真を当年の日付へ置く場合は`--source-year`を`--year`と同じ値にします。前年の写真を今年の曜日配置へ載せる場合は、`--source-year`を1年前にします。
 
-`max_files`や`max_disk_mb`を設定しない限り、YouTube Live Snapshotは古い画像を自動削除しません。永続アーカイブに削除制限を導入する場合は、事前にバックアップと運用方針を確認してください。
+`max_files`または`max_disk_mb`を設定した場合だけ画像が削除されます。上限は、保存中の系列と同じprefixを持つ通常PNGへ適用されます。既存アーカイブに削除制限を追加する前に、実際の保持動作を確認してバックアップを用意してください。

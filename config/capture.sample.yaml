@@ -1,4 +1,4 @@
-# YouTube Live Snapshot v3.3.1 sample configuration
+# YouTube Live Snapshot capture sample configuration
 embed_url: null  # required: YouTube watch/live/embed URL
 chrome:
   driver_path: /usr/bin/chromedriver
@@ -17,21 +17,21 @@ capture:
   source_resolution:
     preferred_width: 1280               # wait up to wait_sec for 720p or better
     preferred_height: 720
-    minimum_width: 640                  # never publish a source frame below 360p
+    minimum_width: 640                  # never save a source frame below 360p
     minimum_height: 360
     wait_sec: 30                        # then accept minimum quality or retry the page
   ai_validation:
     enabled: false                      # opt in; no API request is made by default
     model: gpt-5.6-luna
-    mode: enforce                       # legacy advisory is an enforcing alias
+    mode: enforce                       # failed or uncertain AI checks are retried
     detail: original                    # recommended when reading a small timestamp
     api_key_env: OPENAI_API_KEY         # key value stays in the environment
     timeout_sec: 45
     timestamp_tolerance_sec: 360         # freshness guard; allows modest camera-clock skew
     require_timestamp: false            # enable for streams with a visible camera clock
     max_output_tokens: 400
-  max_files: null         # set an integer only when old captures may be deleted
-  max_disk_mb: null       # set an integer only when old captures may be deleted
+  max_files: null         # per-prefix limit; set only when old captures may be deleted
+  max_disk_mb: null       # per-prefix PNG limit; set only when old captures may be deleted
 schedule:
   timezone: Asia/Tokyo
   latitude: null           # required when enable_sunset is true
@@ -40,7 +40,7 @@ schedule:
   region: Japan
   sunset_offset_minutes: 40
   sunset_prefix: sunset
-  misfire_grace_time_sec: 300  # run once when Pi scheduling is delayed by up to 5 minutes
+  misfire_grace_time_sec: 300  # run once after a scheduler delay of up to 5 minutes
   fixed_times:
     - id: noon
       time: "12:00"
@@ -49,7 +49,7 @@ schedule:
     # - id: morning
     #   time: "08:00"
     #   prefix: morning
-  enable_sunset: true
+  enable_sunset: false       # set coordinates above before enabling
 logging:
   level: INFO
   log_file: null

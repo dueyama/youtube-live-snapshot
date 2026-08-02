@@ -1,5 +1,5 @@
-# YouTube Live Snapshot renderer v3.1 sample configuration
-year: 2025
+# YouTube Live Snapshot renderer sample configuration
+year: 2026  # output year; update this when rendering another calendar year
 source_year: null
 locale: ja  # ja or en
 input_dir: ./captures
@@ -21,6 +21,7 @@ logging:
   level: INFO
   log_file: ./out/calendar.log
 categories:
+  # Example sea/sky crops for a landscape webcam; rename or replace as needed.
   - id: noon_sea
     prefix: noon
     gravity: south

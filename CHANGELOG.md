@@ -21,8 +21,8 @@
 - Keep rejected evidence outside official capture discovery, calendar input,
   and normal capture pruning, with no automatic deletion.
 - Preserve an existing official filename on collision, archive the newly
-  validated but unpublished attempt, and never report that collision as a
-  successful publication.
+  validated but unsaved attempt, and never report that collision as a
+  successful save.
 
 ## 3.2.1 - 2026-08-02
 
@@ -63,6 +63,6 @@
 - Add multiple configurable fixed capture times per day.
 - Keep date-based sunset capture with a configurable offset and prefix.
 - Allow safe custom capture prefixes in renderer categories.
-- Move private stream URLs and coordinates out of source defaults.
+- Require stream URLs and sunset coordinates through runtime configuration.
 - Add path validation, broader runtime-data ignores, CI, and third-party font notices.
 - Document Raspberry Pi OS, general Linux, macOS, and AI-assisted setup.

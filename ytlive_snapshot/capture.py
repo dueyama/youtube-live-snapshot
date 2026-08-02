@@ -2513,7 +2513,11 @@ def main(argv=None, *, prog=None):
     )
     parser.add_argument("--retry-delay-sec", type=int, help="リトライ間隔（秒）")
     parser.add_argument("--max-files", type=int, help="prefix ごとの最大保存枚数")
-    parser.add_argument("--max-disk-mb", type=float, help="出力ディレクトリのサイズ上限（MB）")
+    parser.add_argument(
+        "--max-disk-mb",
+        type=float,
+        help="prefixごとの通常PNGに適用する容量上限（MB）",
+    )
     ai_group = parser.add_mutually_exclusive_group()
     ai_group.add_argument(
         "--ai-validate",
