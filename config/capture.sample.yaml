@@ -1,4 +1,4 @@
-# YouTube Live Snapshot v3.2 sample configuration
+# YouTube Live Snapshot v3.2.1 sample configuration
 embed_url: null  # required: YouTube watch/live/embed URL
 chrome:
   driver_path: /usr/bin/chromedriver
@@ -14,6 +14,12 @@ capture:
   live_edge_require_verification: true  # retry unless the player proves it is close to live
   frame_validation: true                # reject blank/error/loading screenshots
   frame_min_luminance_stddev: 10
+  source_resolution:
+    preferred_width: 1280               # wait up to wait_sec for 720p or better
+    preferred_height: 720
+    minimum_width: 640                  # never publish a source frame below 360p
+    minimum_height: 360
+    wait_sec: 30                        # then accept minimum quality or retry the page
   ai_validation:
     enabled: false                      # opt in; no API request is made by default
     model: gpt-5.6-luna

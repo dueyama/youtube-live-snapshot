@@ -72,6 +72,11 @@ DEFAULT_RETRY_DELAY_SEC = 10
 DEFAULT_PAGE_LOAD_TIMEOUT = 30
 DEFAULT_TEST_INTERVAL_MINUTES = 2
 DEFAULT_SCHEDULE_MISFIRE_GRACE_SEC = 300
+DEFAULT_SOURCE_MINIMUM_WIDTH = 640
+DEFAULT_SOURCE_MINIMUM_HEIGHT = 360
+DEFAULT_SOURCE_PREFERRED_WIDTH = 1280
+DEFAULT_SOURCE_PREFERRED_HEIGHT = 720
+DEFAULT_SOURCE_RESOLUTION_WAIT_SEC = 30
 CAPTURE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 FIXED_TIME_RE = re.compile(r"^(?P<hour>[01]\d|2[0-3]):(?P<minute>[0-5]\d)$")
 
@@ -93,6 +98,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "live_edge_require_verification": True,
         "frame_validation": True,
         "frame_min_luminance_stddev": 10,
+        "source_resolution": {
+            "minimum_width": DEFAULT_SOURCE_MINIMUM_WIDTH,
+            "minimum_height": DEFAULT_SOURCE_MINIMUM_HEIGHT,
+            "preferred_width": DEFAULT_SOURCE_PREFERRED_WIDTH,
+            "preferred_height": DEFAULT_SOURCE_PREFERRED_HEIGHT,
+            "wait_sec": DEFAULT_SOURCE_RESOLUTION_WAIT_SEC,
+        },
         "ai_validation": {
             "enabled": False,
             "model": ai_validation.DEFAULT_MODEL,
@@ -260,9 +272,9 @@ def _validate_runtime_config(
     sunset_prefix = schedule_cfg.get("sunset_prefix", "sunset")
     if not isinstance(sunset_prefix, str) or not CAPTURE_NAME_RE.fullmatch(sunset_prefix):
         raise ValueError("sunset_prefix must contain only letters, numbers, underscores, and hyphens")
-    ai_validation.validate_config(
-        config.setdefault("capture", {}).setdefault("ai_validation", {}),
-    )
+    capture_cfg = config.setdefault("capture", {})
+    _source_resolution_settings(capture_cfg)
+    ai_validation.validate_config(capture_cfg.setdefault("ai_validation", {}))
 
 
 def _configured_fixed_times(schedule_cfg: Dict[str, Any]) -> list:
@@ -347,9 +359,53 @@ def _validate_positive(name: str, value: Optional[int]) -> Optional[int]:
 
 def _validate_non_negative_float(name: str, value: Any) -> float:
     numeric_value = float(value)
-    if numeric_value < 0:
-        raise ValueError(f"{name} must be >= 0")
+    if not math.isfinite(numeric_value) or numeric_value < 0:
+        raise ValueError(f"{name} must be finite and >= 0")
     return numeric_value
+
+
+def _validate_positive_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _source_resolution_settings(capture_cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    raw = capture_cfg.get("source_resolution", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("capture.source_resolution must be a mapping")
+
+    settings = {
+        "minimum_width": _validate_positive_int(
+            "capture.source_resolution.minimum_width",
+            raw.get("minimum_width", DEFAULT_SOURCE_MINIMUM_WIDTH),
+        ),
+        "minimum_height": _validate_positive_int(
+            "capture.source_resolution.minimum_height",
+            raw.get("minimum_height", DEFAULT_SOURCE_MINIMUM_HEIGHT),
+        ),
+        "preferred_width": _validate_positive_int(
+            "capture.source_resolution.preferred_width",
+            raw.get("preferred_width", DEFAULT_SOURCE_PREFERRED_WIDTH),
+        ),
+        "preferred_height": _validate_positive_int(
+            "capture.source_resolution.preferred_height",
+            raw.get("preferred_height", DEFAULT_SOURCE_PREFERRED_HEIGHT),
+        ),
+        "wait_sec": _validate_non_negative_float(
+            "capture.source_resolution.wait_sec",
+            raw.get("wait_sec", DEFAULT_SOURCE_RESOLUTION_WAIT_SEC),
+        ),
+    }
+    if settings["preferred_width"] < settings["minimum_width"]:
+        raise ValueError(
+            "capture.source_resolution.preferred_width must be >= minimum_width"
+        )
+    if settings["preferred_height"] < settings["minimum_height"]:
+        raise ValueError(
+            "capture.source_resolution.preferred_height must be >= minimum_height"
+        )
+    return settings
 
 
 def _ensure_output_dir(path: Path):
@@ -1182,24 +1238,87 @@ def _video_frame_status(driver) -> Dict[str, Any]:
     )
 
 
-def _wait_for_youtube_video_frame(driver, timeout_sec: int = 8) -> Dict[str, Any]:
-    def _ready_status(d):
+def _source_resolution_result(
+    status: Mapping[str, Any],
+    settings: Mapping[str, Any],
+) -> str:
+    if not status.get("ready"):
+        return "not_ready"
+
+    width = int(status.get("videoWidth") or 0)
+    height = int(status.get("videoHeight") or 0)
+    if (
+        width >= settings["preferred_width"]
+        and height >= settings["preferred_height"]
+    ):
+        return "preferred"
+    if (
+        width >= settings["minimum_width"]
+        and height >= settings["minimum_height"]
+    ):
+        return "minimum"
+    return "below_minimum"
+
+
+def _source_resolution_validation_error(
+    status: Mapping[str, Any],
+    settings: Mapping[str, Any],
+) -> Optional[str]:
+    result = _source_resolution_result(status, settings)
+    if result == "not_ready":
+        return f"YouTube video frame is not ready: {dict(status)}"
+    if result == "below_minimum":
+        width = int(status.get("videoWidth") or 0)
+        height = int(status.get("videoHeight") or 0)
+        return (
+            "YouTube source resolution is below the configured minimum "
+            f"(observed={width}x{height}, "
+            f"minimum={settings['minimum_width']}x{settings['minimum_height']})"
+        )
+    return None
+
+
+def _wait_for_youtube_video_frame(
+    driver,
+    timeout_sec: float = 8,
+    *,
+    preferred_width: Optional[int] = None,
+    preferred_height: Optional[int] = None,
+) -> Dict[str, Any]:
+    def _preferred_status(d):
         status = _video_frame_status(d)
-        return status if status.get("ready") else False
+        if not status.get("ready"):
+            return False
+        if preferred_width is None or preferred_height is None:
+            return status
+        if (
+            int(status.get("videoWidth") or 0) >= preferred_width
+            and int(status.get("videoHeight") or 0) >= preferred_height
+        ):
+            return status
+        return False
 
     try:
         return WebDriverWait(driver, timeout_sec, poll_frequency=0.25).until(
-            _ready_status
+            _preferred_status
         )
     except TimeoutException:
         return _video_frame_status(driver)
 
 
-def _save_video_canvas_screenshot(driver, target_path: Path) -> bool:
+def _save_video_canvas_screenshot(
+    driver,
+    target_path: Path,
+    *,
+    minimum_source_width: int = 1,
+    minimum_source_height: int = 1,
+) -> bool:
     """YouTube UI レイヤーを含めず、video の現在フレームだけを PNG 保存する。"""
     driver.set_script_timeout(8)
     result = driver.execute_async_script(
         """
+        const minimumSourceWidth = Number(arguments[0]) || 1;
+        const minimumSourceHeight = Number(arguments[1]) || 1;
         const done = arguments[arguments.length - 1];
         const video = document.querySelector('video');
         if (!video) {
@@ -1220,6 +1339,20 @@ def _save_video_canvas_screenshot(driver, target_path: Path) -> bool:
             height,
             sourceWidth,
             sourceHeight
+          });
+          return;
+        }
+        if (sourceWidth < minimumSourceWidth || sourceHeight < minimumSourceHeight) {
+          done({
+            ok: false,
+            reason: 'video source resolution is below minimum',
+            readyState: video.readyState,
+            width,
+            height,
+            sourceWidth,
+            sourceHeight,
+            minimumSourceWidth,
+            minimumSourceHeight
           });
           return;
         }
@@ -1251,10 +1384,27 @@ def _save_video_canvas_screenshot(driver, target_path: Path) -> bool:
             sourceHeight
           });
         }
-        """
+        """,
+        minimum_source_width,
+        minimum_source_height,
     )
 
     if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "video source resolution is below minimum":
+            raise CaptureValidationError(
+                "YouTube source resolution dropped below the configured minimum "
+                f"before canvas capture (observed={result.get('sourceWidth', 0)}x"
+                f"{result.get('sourceHeight', 0)}, "
+                f"minimum={minimum_source_width}x{minimum_source_height})"
+            )
+        if reason in {"video element not found", "video frame is not ready"}:
+            raise CaptureValidationError(
+                "YouTube video became unavailable before canvas capture "
+                f"(reason={reason}, readyState={result.get('readyState')}, "
+                f"source={result.get('sourceWidth', 0)}x"
+                f"{result.get('sourceHeight', 0)})"
+            )
         logger.warning("video canvas screenshot failed: %s", result)
         return False
 
@@ -1323,6 +1473,7 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
         "frame_min_luminance_stddev",
         capture_cfg.get("frame_min_luminance_stddev", 10),
     )
+    source_resolution = _source_resolution_settings(capture_cfg)
 
     for attempt in range(1, max_retries + 1):
         driver = None
@@ -1415,14 +1566,52 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                         if live_edge_error:
                             raise CaptureValidationError(live_edge_error)
                     _hide_youtube_player_ui(driver)
-                    frame_status = _wait_for_youtube_video_frame(driver)
-                    if frame_status.get("ready"):
-                        logger.debug("YouTube video frame ready before canvas: %s", frame_status)
+                    frame_status = _wait_for_youtube_video_frame(
+                        driver,
+                        source_resolution["wait_sec"],
+                        preferred_width=source_resolution["preferred_width"],
+                        preferred_height=source_resolution["preferred_height"],
+                    )
+                    resolution_result = _source_resolution_result(
+                        frame_status,
+                        source_resolution,
+                    )
+                    resolution_log = (
+                        "YouTube source resolution check: observed=%sx%s result=%s "
+                        "preferred=%sx%s minimum=%sx%s"
+                    )
+                    resolution_log_args = (
+                        frame_status.get("videoWidth", 0),
+                        frame_status.get("videoHeight", 0),
+                        resolution_result,
+                        source_resolution["preferred_width"],
+                        source_resolution["preferred_height"],
+                        source_resolution["minimum_width"],
+                        source_resolution["minimum_height"],
+                    )
+                    if resolution_result == "preferred":
+                        logger.info(resolution_log, *resolution_log_args)
                     else:
-                        raise CaptureValidationError(
-                            f"YouTube video frame is not ready: {frame_status}"
+                        logger.warning(resolution_log, *resolution_log_args)
+                    resolution_error = _source_resolution_validation_error(
+                        frame_status,
+                        source_resolution,
+                    )
+                    if resolution_error:
+                        raise CaptureValidationError(resolution_error)
+                    if not _save_video_canvas_screenshot(
+                        driver,
+                        attempt_path,
+                        minimum_source_width=source_resolution["minimum_width"],
+                        minimum_source_height=source_resolution["minimum_height"],
+                    ):
+                        fallback_status = _video_frame_status(driver)
+                        fallback_resolution_error = _source_resolution_validation_error(
+                            fallback_status,
+                            source_resolution,
                         )
-                    if not _save_video_canvas_screenshot(driver, attempt_path):
+                        if fallback_resolution_error:
+                            raise CaptureValidationError(fallback_resolution_error)
                         video_element = driver.find_element(By.CSS_SELECTOR, "video.html5-main-video, video")
                         video_size = video_element.size
                         video_width = video_size.get("width", 0)
@@ -1433,6 +1622,13 @@ def capture_embed_video(config: Dict[str, Any], file_prefix: str, is_test: bool 
                         else:
                             raise WebDriverException("video element size returned zero")
                 except (NoSuchElementException, WebDriverException) as exc:
+                    fallback_status = _video_frame_status(driver)
+                    fallback_resolution_error = _source_resolution_validation_error(
+                        fallback_status,
+                        source_resolution,
+                    )
+                    if fallback_resolution_error:
+                        raise CaptureValidationError(fallback_resolution_error) from exc
                     logger.warning("video screenshot failed (%s), falling back to iframe", exc)
                     driver.switch_to.default_content()
                     iframe_size = iframe_element.size

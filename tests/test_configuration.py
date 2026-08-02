@@ -15,6 +15,16 @@ class ConfigurationTest(unittest.TestCase):
         self.assertFalse(
             capture.DEFAULT_CONFIG["capture"]["ai_validation"]["enabled"]
         )
+        self.assertEqual(
+            capture.DEFAULT_CONFIG["capture"]["source_resolution"],
+            {
+                "minimum_width": 640,
+                "minimum_height": 360,
+                "preferred_width": 1280,
+                "preferred_height": 720,
+                "wait_sec": 30,
+            },
+        )
 
     def test_environment_overrides_private_values(self):
         config = copy.deepcopy(capture.DEFAULT_CONFIG)
@@ -93,6 +103,44 @@ class ConfigurationTest(unittest.TestCase):
         self.assertEqual(ai_config["model"], "gpt-5.6-luna")
         self.assertEqual(ai_config["timestamp_tolerance_sec"], 180)
         self.assertTrue(ai_config["require_timestamp"])
+
+    def test_old_config_without_resolution_section_uses_safe_defaults(self):
+        settings = capture._source_resolution_settings({})
+
+        self.assertEqual(settings["minimum_width"], 640)
+        self.assertEqual(settings["minimum_height"], 360)
+        self.assertEqual(settings["preferred_width"], 1280)
+        self.assertEqual(settings["preferred_height"], 720)
+        self.assertEqual(settings["wait_sec"], 30)
+
+    def test_source_resolution_values_must_be_positive_integers(self):
+        with self.assertRaisesRegex(ValueError, "minimum_width"):
+            capture._source_resolution_settings(
+                {"source_resolution": {"minimum_width": 0}}
+            )
+        with self.assertRaisesRegex(ValueError, "preferred_height"):
+            capture._source_resolution_settings(
+                {"source_resolution": {"preferred_height": 720.5}}
+            )
+
+    def test_source_resolution_wait_must_be_finite(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    capture._source_resolution_settings(
+                        {"source_resolution": {"wait_sec": value}}
+                    )
+
+    def test_preferred_source_resolution_must_cover_minimum(self):
+        with self.assertRaisesRegex(ValueError, "preferred_width"):
+            capture._source_resolution_settings(
+                {
+                    "source_resolution": {
+                        "minimum_width": 1280,
+                        "preferred_width": 640,
+                    }
+                }
+            )
 
 
 if __name__ == "__main__":

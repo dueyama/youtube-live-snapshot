@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.2.1 - 2026-08-02
+
+- Wait up to 30 seconds for a preferred `1280x720` YouTube source frame.
+- Accept `640x360` or better after that wait, but reject lower source resolutions
+  and retry with a fresh browser session.
+- Recheck source dimensions immediately before canvas capture so element, iframe,
+  and full-screen fallbacks cannot publish an enlarged low-resolution frame.
+- Keep source-resolution validation local, deterministic, configurable, and
+  independent of optional AI inspection.
+
 ## 3.2.0 - 2026-08-02
 
 - Add optional OpenAI vision inspection with `gpt-5.6-luna`, structured

@@ -23,6 +23,7 @@ This is not an official YouTube or Google project.
 - Single-run and short-interval test modes
 - YAML, environment-variable, and CLI configuration
 - Retries, logging, and optional retention limits
+- Preferred and minimum source-resolution checks before publishing a frame
 - Automatic normalization of YouTube watch, share, live, and embed URLs
 - Optional OpenAI vision inspection of frame quality and visible timestamps
 
@@ -122,6 +123,14 @@ At minimum, set the live-video URL. Latitude and longitude are required only whe
 ```yaml
 embed_url: "https://www.youtube.com/embed/VIDEO_ID"
 
+capture:
+  source_resolution:
+    preferred_width: 1280
+    preferred_height: 720
+    minimum_width: 640
+    minimum_height: 360
+    wait_sec: 30
+
 schedule:
   timezone: Asia/Tokyo
   latitude: 35.0
@@ -198,6 +207,8 @@ ytlive-snapshot capture \
 For continuous operation, run the foreground command from systemd or another service manager. Keep the service definition, boot ordering, credentials, and host lifecycle in the host-management layer. See [RUNBOOK.md](RUNBOOK.md).
 
 Before publishing a capture, the tool checks YouTube's own LIVE-control state when available and avoids seeking a player that already reports live playback. This mechanical check uses player state and control structure rather than localized words such as `LIVE`, so it remains independent of the optional AI feature and of the browser language. If the control reports delayed playback, the tool uses it to return to live and verifies the result. Some headless embeds do not render that control; in that case the tool confirms that the player identifies the stream as live and preserves its initially loaded frame. It deliberately does not seek from raw DVR `duration`, `currentTime`, or seekable-range differences because YouTube can expose values roughly one DVR window apart even while showing a current frame. It also verifies that the saved frame is readable and visually non-uniform. Blank frames, loading screens, and common player-error frames are retried. Attempts are written to temporary files and only a validated image is moved to its final persistent filename. These checks are enabled by default and can be tuned in the `capture` section of the YAML file.
+
+The PNG canvas dimensions are not proof of source quality: a `426x240` video can otherwise be enlarged into a `1666x937` PNG. By default, the tool therefore waits up to 30 seconds for a preferred `1280x720` source. If that quality is unavailable, it accepts a current frame of at least `640x360`; anything lower fails the attempt and the normal retry opens a fresh browser page. The source dimensions are checked again at the instant of canvas capture, so screenshot fallbacks cannot bypass the limit. This is a deterministic `videoWidth`/`videoHeight` check and remains active without AI. Streams with different quality constraints can tune `capture.source_resolution`.
 
 Current YouTube/Chromium behavior has an important ambiguity: in some headless embeds, `video.seekable.end(0) - video.currentTime` is reported as exactly `3600` seconds even when the visible camera clock is only tens of seconds behind wall-clock time. That value is a distance on the player's internal DVR timeline, not proof that the displayed video is one hour late. The tool therefore logs it only as diagnostic `raw_media_lag` and never seeks from that value alone. A seek is attempted only when YouTube's own LIVE control explicitly reports delayed playback. If the stream includes a visible clock, its real-world freshness can additionally be checked by a person or by the optional AI inspection.
 
@@ -495,6 +506,14 @@ cp config/capture.sample.yaml config/capture.yaml
 ```yaml
 embed_url: "https://www.youtube.com/embed/VIDEO_ID"
 
+capture:
+  source_resolution:
+    preferred_width: 1280
+    preferred_height: 720
+    minimum_width: 640
+    minimum_height: 360
+    wait_sec: 30
+
 schedule:
   timezone: Asia/Tokyo
   latitude: 35.0
@@ -535,6 +554,8 @@ ytlive-snapshot capture \
 常時稼働ではsystemdなどからこのコマンドをフォアグラウンド実行します。サービス定義、起動停止、秘密設定、OS管理はホスト管理側で扱います。詳しくは[RUNBOOK.md](RUNBOOK.md)を参照してください。
 
 保存前に、利用できる場合はYouTube自身のLIVE表示状態を確認し、すでにライブ再生中ならシークしません。この機械判定は`LIVE`や`ライブ`という言語別文字列ではなく、プレイヤー状態と操作UIの構造を使うため、任意のAI検査やブラウザ言語に依存しません。遅れ再生と表示された場合だけLIVE操作で追いつき、その結果を再確認します。headless埋め込みではLIVE操作UIが描画されない場合があるため、その場合はプレイヤーがライブ配信と報告していることを確認し、最初に読み込まれたフレームをそのまま使います。YouTubeは現在映像を表示中でもDVRの`duration`、`currentTime`、seekable範囲に約1時間の差を返す場合があるため、これらの曖昧な値だけを根拠にはシークしません。さらに、画像が読み取り可能で黒画面やほぼ一様なエラー画面ではないことも検査します。読み込み中やプレーヤーエラーなどは再試行し、検査に合格した画像だけを一時ファイルから永続ファイル名へ移します。これらは既定で有効です。
+
+保存PNGの寸法だけでは元映像の品質は分かりません。例えば`426x240`の動画でもcanvasで`1666x937`へ拡大できます。そのため既定では、最大30秒間、元映像が優先値`1280x720`になるのを待ちます。そこまで上がらなくても現在の映像が最低`640x360`以上なら採用し、未満ならその回を不合格として新しいブラウザページで通常の再試行を行います。canvas保存の瞬間にも元解像度を再確認するため、代替スクリーンショット経路で条件を迂回できません。これは`videoWidth`と`videoHeight`を使うAI非依存の機械判定です。配信事情が異なる場合は`capture.source_resolution`で調整できます。
 
 現在のYouTube／Chromiumには注意すべき曖昧さがあります。一部のheadless埋め込みでは、`video.seekable.end(0) - video.currentTime`が正確に`3600`秒を返しても、画面内のカメラ時計は実時刻から数十秒しか遅れていないことがあります。この値はプレイヤー内部のDVR時間軸上の距離であり、映像が現実に1時間遅れている証拠ではありません。そのため、本ツールはこれを診断用の`raw_media_lag`としてログに残すだけで、この値単独ではシークしません。YouTube自身のLIVE操作が遅れ再生を明示した場合だけシークを試みます。画面内に時計がある配信では、人による確認または任意のAI画像検査で実時刻との鮮度を追加確認できます。
 

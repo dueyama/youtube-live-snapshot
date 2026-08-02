@@ -23,6 +23,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install .
 .venv/bin/python -m py_compile ytlive_snapshot/*.py
 .venv/bin/ytlive-snapshot --help
+.venv/bin/ytlive-snapshot --version
 .venv/bin/python -m pip check
 ```
 
@@ -57,7 +58,11 @@ YTLIVE_SNAPSHOT_CONFIG=/etc/ytlive-snapshot/capture.yaml \
   --output-dir /var/lib/ytlive-snapshot/captures_test
 ```
 
-生成されたPNGを確認してから定期実行へ進んでください。
+生成されたPNGを確認してから定期実行へ進んでください。終了コードだけでなく、
+ログの`YouTube source resolution check`が`result=preferred`または
+`result=minimum`であり、`observed`が最低`640x360`以上であることも確認します。
+保存PNGの寸法は元動画の解像度ではありません。最低値未満のフレームは一時
+ファイルのまま破棄され、永続ファイル名には公開されません。
 
 ## サービスマネージャーとの統合
 
