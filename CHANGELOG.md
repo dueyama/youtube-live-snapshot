@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.3.1 - 2026-08-02
+
+- Increase the default AI timestamp tolerance from two to six minutes so the
+  freshness gate allows modest camera-clock skew as well as stream delay.
+
 ## 3.3.0 - 2026-08-02
 
 - Publish an official image only after every enabled mechanical and AI check

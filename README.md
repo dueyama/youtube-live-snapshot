@@ -277,7 +277,7 @@ capture:
     mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
-    timestamp_tolerance_sec: 120
+    timestamp_tolerance_sec: 360
     require_timestamp: false
 ```
 
@@ -290,6 +290,9 @@ their evidence. The former `advisory` value is accepted temporarily for
 configuration compatibility, emits a deprecation warning, and now behaves as
 `enforce`; report-only AI review belongs in a separate post-capture audit.
 Streams without a visible camera clock should leave `require_timestamp: false`.
+The default six-minute tolerance treats the timestamp as a broad freshness
+guard rather than a clock-synchronization check, allowing for modest camera
+clock skew as well as stream delay.
 
 The same settings can be overridden for one run:
 
@@ -605,11 +608,13 @@ capture:
     mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
-    timestamp_tolerance_sec: 120
+    timestamp_tolerance_sec: 360
     require_timestamp: false
 ```
 
 AIを有効にすると、その判定も正式保存の必須条件になります。`decision=pass`で時刻条件も満たした画像だけが正式画像です。明確な画面不良や古い・未来の時刻は`rejected`、判断不能、API障害、不正な応答、必須時刻を読めない場合は`unverified`として証拠を残し、どちらも同じ上限付き試行枠で再撮影します。以前の`advisory`値は設定互換のため一時的に受理しますが、非推奨警告を出して`enforce`と同じ動作をします。ログだけのAI確認は、撮影後の別監査として行う位置付けです。時刻表示のない配信では`require_timestamp: false`のまま使用します。
+
+既定の許容差は6分です。これは時計同期の厳密な検査ではなく、大きな鮮度異常を見つけるための幅を持たせた判定であり、配信遅延だけでなくカメラ時計自体の多少のずれも許容します。
 
 この機能を有効にした場合だけ、撮影画像がOpenAIへ送信され、API利用料が発生します。リクエストは`store: false`ですが、配信の公開範囲と利用許可は利用者が確認してください。AI検査はローカル検査を補完するもので、信頼できる時刻表示がない画像だけから「現在ライブ中」と完全に証明するものではありません。公式の[画像入力ガイド](https://developers.openai.com/api/docs/guides/images-vision)と[`gpt-5.6-luna`モデル情報](https://developers.openai.com/api/docs/models/gpt-5.6-luna)も参照してください。
 

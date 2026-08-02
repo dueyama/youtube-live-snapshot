@@ -1,4 +1,4 @@
-# YouTube Live Snapshot v3.3.0 sample configuration
+# YouTube Live Snapshot v3.3.1 sample configuration
 embed_url: null  # required: YouTube watch/live/embed URL
 chrome:
   driver_path: /usr/bin/chromedriver
@@ -27,7 +27,7 @@ capture:
     detail: original                    # recommended when reading a small timestamp
     api_key_env: OPENAI_API_KEY         # key value stays in the environment
     timeout_sec: 45
-    timestamp_tolerance_sec: 120
+    timestamp_tolerance_sec: 360         # freshness guard; allows modest camera-clock skew
     require_timestamp: false            # enable for streams with a visible camera clock
     max_output_tokens: 400
   max_files: null         # set an integer only when old captures may be deleted

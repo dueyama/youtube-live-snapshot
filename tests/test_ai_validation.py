@@ -114,6 +114,61 @@ class AIInspectionTest(unittest.TestCase):
             result.rejection_reason(require_timestamp=True),
         )
 
+    def test_default_tolerance_allows_six_minutes_of_camera_clock_skew(self):
+        config = dict(self.config)
+        config.pop("timestamp_tolerance_sec")
+        boundary_client = FakeClient(
+            passing_payload("2026-08-01T17:26:24+09:00")
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image = self._image(temp_dir)
+            at_boundary = ai_validation.inspect_capture(
+                image,
+                captured_at=self.expected,
+                config=config,
+                environ={"OPENAI_API_KEY": "test-secret"},
+                client_factory=lambda **kwargs: boundary_client,
+            )
+            outside_boundary = ai_validation.inspect_capture(
+                image,
+                captured_at=self.expected,
+                config=config,
+                environ={"OPENAI_API_KEY": "test-secret"},
+                client_factory=lambda **kwargs: FakeClient(
+                    passing_payload("2026-08-01T17:26:23+09:00")
+                ),
+            )
+            future_boundary = ai_validation.inspect_capture(
+                image,
+                captured_at=self.expected,
+                config=config,
+                environ={"OPENAI_API_KEY": "test-secret"},
+                client_factory=lambda **kwargs: FakeClient(
+                    passing_payload("2026-08-01T17:38:24+09:00")
+                ),
+            )
+            outside_future_boundary = ai_validation.inspect_capture(
+                image,
+                captured_at=self.expected,
+                config=config,
+                environ={"OPENAI_API_KEY": "test-secret"},
+                client_factory=lambda **kwargs: FakeClient(
+                    passing_payload("2026-08-01T17:38:25+09:00")
+                ),
+            )
+
+        self.assertEqual(at_boundary.timestamp_delta_seconds, -360)
+        self.assertEqual(at_boundary.timestamp_status, "matches")
+        self.assertEqual(outside_boundary.timestamp_delta_seconds, -361)
+        self.assertEqual(outside_boundary.timestamp_status, "stale")
+        self.assertEqual(future_boundary.timestamp_delta_seconds, 360)
+        self.assertEqual(future_boundary.timestamp_status, "matches")
+        self.assertEqual(outside_future_boundary.timestamp_delta_seconds, 361)
+        self.assertEqual(outside_future_boundary.timestamp_status, "future")
+        prompt = boundary_client.responses.kwargs["input"][0]["content"][0]["text"]
+        self.assertIn("at most 360 seconds", prompt)
+
     def test_null_observed_timestamp_cannot_claim_a_match(self):
         client = FakeClient(passing_payload(None))
         with tempfile.TemporaryDirectory() as temp_dir:

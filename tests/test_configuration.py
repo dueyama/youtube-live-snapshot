@@ -20,6 +20,12 @@ class ConfigurationTest(unittest.TestCase):
             "enforce",
         )
         self.assertEqual(
+            capture.DEFAULT_CONFIG["capture"]["ai_validation"][
+                "timestamp_tolerance_sec"
+            ],
+            360.0,
+        )
+        self.assertEqual(
             capture.DEFAULT_CONFIG["capture"]["source_resolution"],
             {
                 "minimum_width": 640,
