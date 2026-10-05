@@ -37,13 +37,16 @@ def passing_payload(timestamp="2026-08-01T17:31:39+09:00"):
 
 
 class AIInspectionTest(unittest.TestCase):
+    def test_default_model_is_gpt_6_luna(self):
+        self.assertEqual(ai_validation.DEFAULT_MODEL, "gpt-6-luna")
+
     def setUp(self):
         self.expected = timezone("Asia/Tokyo").localize(
             dt.datetime(2026, 8, 1, 17, 32, 24)
         )
         self.config = {
             "enabled": True,
-            "model": "gpt-5.6-luna",
+            "model": "gpt-6-luna",
             "mode": "enforce",
             "detail": "original",
             "api_key_env": "OPENAI_API_KEY",
@@ -81,7 +84,7 @@ class AIInspectionTest(unittest.TestCase):
         self.assertEqual(factory_args["api_key"], "test-secret")
         self.assertEqual(factory_args["max_retries"], 0)
         request = client.responses.kwargs
-        self.assertEqual(request["model"], "gpt-5.6-luna")
+        self.assertEqual(request["model"], "gpt-6-luna")
         self.assertFalse(request["store"])
         self.assertEqual(request["input"][0]["content"][1]["detail"], "original")
         self.assertTrue(

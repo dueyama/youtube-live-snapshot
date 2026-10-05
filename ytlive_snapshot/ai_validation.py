@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 
-DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_MODEL = "gpt-6-luna"
 DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
 DEFAULT_DETAIL = "original"
 DEFAULT_MODE = "enforce"

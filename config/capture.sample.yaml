@@ -22,7 +22,7 @@ capture:
     wait_sec: 30                        # then accept minimum quality or retry the page
   ai_validation:
     enabled: false                      # opt in; no API request is made by default
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     mode: enforce                       # failed or uncertain AI checks are retried
     detail: original                    # recommended when reading a small timestamp
     api_key_env: OPENAI_API_KEY         # key value stays in the environment

@@ -100,7 +100,7 @@ class ConfigurationTest(unittest.TestCase):
         args = SimpleNamespace(
             ai_validation_enabled=True,
             ai_validation_mode="advisory",
-            ai_model="gpt-5.6-luna",
+            ai_model="gpt-6-luna",
             ai_timestamp_tolerance_sec=180,
             ai_require_timestamp=True,
         )
@@ -110,7 +110,7 @@ class ConfigurationTest(unittest.TestCase):
         ai_config = config["capture"]["ai_validation"]
         self.assertTrue(ai_config["enabled"])
         self.assertEqual(ai_config["mode"], "advisory")
-        self.assertEqual(ai_config["model"], "gpt-5.6-luna")
+        self.assertEqual(ai_config["model"], "gpt-6-luna")
         self.assertEqual(ai_config["timestamp_tolerance_sec"], 180)
         self.assertTrue(ai_config["require_timestamp"])
 

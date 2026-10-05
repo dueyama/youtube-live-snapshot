@@ -32,7 +32,7 @@ class RejectedCaptureArchiveTest(unittest.TestCase):
             "image_quality": {"status": "pass"},
             "ai_validation": {
                 "status": "fail",
-                "model": "gpt-5.6-luna",
+                "model": "gpt-6-luna",
                 "decision": "fail",
                 "confidence": 0.99,
                 "timestamp_status": "stale",

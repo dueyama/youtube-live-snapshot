@@ -250,7 +250,7 @@ at most, a visible camera timestamp provides independent supporting evidence.
 When enabled, the captured image is sent to the OpenAI Responses API before
 its temporary file is moved to the final filename. The inspector can identify a
 blank or obstructed video frame, read a visible camera clock, and compare that
-clock with the frame-capture time. It uses `gpt-5.6-luna` by default because
+clock with the frame-capture time. It uses `gpt-6-luna` by default because
 that model accepts image input and is intended for cost-sensitive workloads;
 the model remains configurable. Image detail defaults to `original` because
 small timestamp text is an OCR-like task.
@@ -271,7 +271,7 @@ export OPENAI_API_KEY='...'
 capture:
   ai_validation:
     enabled: true
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
@@ -299,7 +299,7 @@ ytlive-snapshot capture \
   --once \
   --ai-validate \
   --ai-validation-mode enforce \
-  --ai-model gpt-5.6-luna
+  --ai-model gpt-6-luna
 ```
 
 Enabling this feature sends the captured image to OpenAI and incurs API usage.
@@ -308,7 +308,7 @@ and authorization requirements. AI inspection complements rather than replaces
 the local checks and cannot by itself prove that a stream is live when the
 image contains no reliable time reference. See the official OpenAI
 [vision input guide](https://developers.openai.com/api/docs/guides/images-vision)
-and [`gpt-5.6-luna` model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+and [`gpt-6-luna` model page](https://developers.openai.com/api/docs/models/gpt-6-luna).
 
 ## Capture schedules
 
@@ -590,7 +590,7 @@ AI画像検査は**既定では無効**です。通常のインストールで�
 
 任意機能としているのは、有効にすると画像を外部へ送信し、ネットワーク、APIキー、利用料が必要になり、OCRや判断を誤る可能性もあるためです。撮影サービス本体はAIなしでも実用的かつ予測可能に動作しなければなりません。AIは機械的なLIVE状態判定を置き換えず、画像内に信頼できる時計がある場合に独立した補足情報を与えるだけです。
 
-有効にすると、一時画像を永続ファイル名へ移す前にOpenAI Responses APIへ送り、黒画面やエラー画面、再生コントロールの映り込み、画像内のカメラ時刻を確認できます。既定モデルは、画像入力に対応する低コスト向けの`gpt-5.6-luna`です。小さな時刻表示を読むため、画像詳細は`original`を既定にしています。
+有効にすると、一時画像を永続ファイル名へ移す前にOpenAI Responses APIへ送り、黒画面やエラー画面、再生コントロールの映り込み、画像内のカメラ時刻を確認できます。既定モデルは、画像入力に対応する低コスト向けの`gpt-6-luna`です。小さな時刻表示を読むため、画像詳細は`original`を既定にしています。
 
 画像内の文字や日付形式は任意の言語・地域を許容します。言語が異なること自体を不合格理由にせず、日月順や数字を確定できない場合は推測せず`unreadable`として扱います。
 
@@ -603,7 +603,7 @@ export OPENAI_API_KEY='...'
 capture:
   ai_validation:
     enabled: true
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     mode: enforce
     detail: original
     api_key_env: OPENAI_API_KEY
@@ -615,7 +615,7 @@ AIを有効にすると、その判定も通常の出力先へ保存するため
 
 既定の許容差は6分です。これは時計同期の厳密な検査ではなく、大きな鮮度異常を見つけるための幅を持たせた判定であり、配信遅延だけでなくカメラ時計自体の多少のずれも許容します。
 
-この機能を有効にした場合だけ、撮影画像がOpenAIへ送信され、API利用料が発生します。リクエストは`store: false`ですが、配信の公開範囲と利用許可は利用者が確認してください。AI検査はローカル検査を補完するもので、信頼できる時刻表示がない画像だけから「現在ライブ中」と完全に証明するものではありません。公式の[画像入力ガイド](https://developers.openai.com/api/docs/guides/images-vision)と[`gpt-5.6-luna`モデル情報](https://developers.openai.com/api/docs/models/gpt-5.6-luna)も参照してください。
+この機能を有効にした場合だけ、撮影画像がOpenAIへ送信され、API利用料が発生します。リクエストは`store: false`ですが、配信の公開範囲と利用許可は利用者が確認してください。AI検査はローカル検査を補完するもので、信頼できる時刻表示がない画像だけから「現在ライブ中」と完全に証明するものではありません。公式の[画像入力ガイド](https://developers.openai.com/api/docs/guides/images-vision)と[`gpt-6-luna`モデル情報](https://developers.openai.com/api/docs/models/gpt-6-luna)も参照してください。
 
 ### 撮影時刻
 
